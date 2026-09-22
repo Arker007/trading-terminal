@@ -1,0 +1,243 @@
+import { useState, useEffect, useRef, useCallback } from 'react';
+import { FormattedCandle, LiveTick, RealtimeStatus, UpdateIntervalOption } from '../types';
+
+interface UseRealtimeBinomoOptions {
+  enabled?: boolean;
+  initialIntervalMs?: UpdateIntervalOption;
+  timeframeSeconds?: number;
+  initialCandles?: FormattedCandle[];
+  onTick?: (tick: LiveTick) => void;
+}
+
+export function useRealtimeBinomo({
+  enabled = true,
+  initialIntervalMs = 500,
+  timeframeSeconds = 60,
+  initialCandles,
+  onTick,
+}: UseRealtimeBinomoOptions = {}) {
+  const [status, setStatus] = useState<RealtimeStatus>('connecting');
+  const [intervalMs, setIntervalMs] = useState<UpdateIntervalOption>(initialIntervalMs);
+  const [latestTick, setLatestTick] = useState<LiveTick | null>(null);
+  const [tickCount, setTickCount] = useState<number>(0);
+  const [ticksPerSec, setTicksPerSec] = useState<number>(0);
+  const [latencyMs, setLatencyMs] = useState<number>(1);
+  const [lastTickDate, setLastTickDate] = useState<Date | null>(null);
+  const [isPaused, setIsPaused] = useState<boolean>(false);
+
+  const eventSourceRef = useRef<EventSource | null>(null);
+  const onTickRef = useRef(onTick);
+  onTickRef.current = onTick;
+
+  // Real-time tick engine references
+  const activeCandleRef = useRef<FormattedCandle | null>(null);
+  const tickCounterRef = useRef<number>(0);
+  const windowTicksRef = useRef<number>(0);
+  const lastSecTimeRef = useRef<number>(Date.now());
+  const pollerTimerRef = useRef<any>(null);
+
+  // Synchronize initial candle baseline whenever history is loaded or timeframe changes
+  useEffect(() => {
+    if (initialCandles && initialCandles.length > 0) {
+      const last = initialCandles[initialCandles.length - 1];
+      activeCandleRef.current = {
+        time: last.time,
+        open: last.open,
+        high: last.high,
+        low: last.low,
+        close: last.close,
+        volume: last.volume || 1,
+      };
+    }
+  }, [initialCandles, timeframeSeconds]);
+
+  // Unified tick handler that processes authoritative exchange ticks
+  const handleAuthoritativeTick = useCallback((tick: LiveTick) => {
+    if (!tick || typeof tick.time !== 'number' || isNaN(tick.time)) return;
+    if (typeof tick.close !== 'number' || isNaN(tick.close)) return;
+
+    const alignedTime = Math.floor(tick.time / timeframeSeconds) * timeframeSeconds;
+    const current = activeCandleRef.current;
+    const isNew = !current || alignedTime > current.time;
+
+    if (isNew) {
+      // New candle started on the exchange
+      activeCandleRef.current = {
+        time: alignedTime,
+        open: tick.open,
+        high: tick.high,
+        low: tick.low,
+        close: tick.close,
+        volume: tick.volume || 1,
+      };
+
+      tickCounterRef.current++;
+      windowTicksRef.current++;
+      setTickCount(tickCounterRef.current);
+      setLatestTick({
+        ...tick,
+        time: alignedTime,
+      });
+      setLastTickDate(new Date());
+
+      onTickRef.current?.({
+        ...tick,
+        time: alignedTime,
+        isNewCandle: true,
+        tickIndex: tickCounterRef.current,
+      });
+    } else if (alignedTime === current.time) {
+      // Current candle updated on the exchange
+      const priceOrBarChanged =
+        tick.close !== current.close ||
+        tick.high > current.high ||
+        tick.low < current.low ||
+        tick.open !== current.open;
+
+      current.open = tick.open;
+      current.high = Math.max(current.high, tick.high);
+      current.low = Math.min(current.low, tick.low);
+      current.close = tick.close;
+      current.volume = Math.max(current.volume || 1, tick.volume || 1);
+
+      if (priceOrBarChanged) {
+        tickCounterRef.current++;
+        windowTicksRef.current++;
+        setTickCount(tickCounterRef.current);
+        setLatestTick({
+          ...tick,
+          time: alignedTime,
+        });
+        setLastTickDate(new Date());
+
+        onTickRef.current?.({
+          time: current.time,
+          open: current.open,
+          high: current.high,
+          low: current.low,
+          close: current.close,
+          volume: current.volume,
+          created_at: tick.created_at,
+          isNewCandle: false,
+          tickIndex: tickCounterRef.current,
+          serverTimestamp: tick.serverTimestamp || Date.now(),
+        });
+      }
+    }
+    // If alignedTime < current.time, ignore stale out-of-order tick
+  }, [timeframeSeconds]);
+
+  // 1. Connect to live Binomo SSE stream for the specific active timeframe
+  useEffect(() => {
+    if (!enabled || isPaused) {
+      setStatus(isPaused ? 'paused' : 'connecting');
+      return;
+    }
+
+    let isCleanedUp = false;
+    let es: EventSource | null = null;
+
+    try {
+      es = new EventSource(`/api/binomo/stream?interval=${timeframeSeconds}`);
+      eventSourceRef.current = es;
+
+      es.addEventListener('connected', () => {
+        if (!isCleanedUp) {
+          setStatus('connected');
+        }
+      });
+
+      es.addEventListener('tick', (event) => {
+        if (isCleanedUp) return;
+        try {
+          const data: LiveTick = JSON.parse(event.data);
+          const now = Date.now();
+          const latency = data.serverTimestamp ? Math.max(0, now - data.serverTimestamp) : 12;
+          setLatencyMs(latency);
+          setStatus('connected');
+
+          handleAuthoritativeTick(data);
+        } catch (e) {
+          console.error('Error parsing live tick event:', e);
+        }
+      });
+
+      es.onerror = () => {
+        if (isCleanedUp) return;
+        if (es?.readyState === EventSource.CONNECTING || es?.readyState === EventSource.CLOSED) {
+          setStatus('connecting');
+        }
+      };
+    } catch (e) {
+      console.warn('EventSource initialization failed:', e);
+    }
+
+    return () => {
+      isCleanedUp = true;
+      if (es) {
+        es.close();
+      }
+    };
+  }, [enabled, isPaused, timeframeSeconds, handleAuthoritativeTick]);
+
+  // 2. High-Frequency Poller: polls /api/binomo/latest for the active interval at user-configured rate
+  useEffect(() => {
+    if (!enabled || isPaused) {
+      if (pollerTimerRef.current) clearInterval(pollerTimerRef.current);
+      return;
+    }
+
+    const pollLatestExchangeCandle = async () => {
+      try {
+        const start = Date.now();
+        const res = await fetch(`/api/binomo/latest?interval=${timeframeSeconds}`);
+        if (!res.ok) return;
+        const json = await res.json();
+        if (json.candle) {
+          const rtt = Date.now() - start;
+          setLatencyMs(rtt);
+          handleAuthoritativeTick(json.candle);
+        }
+
+        // Update TPS meter
+        const now = Date.now();
+        const elapsedSec = (now - lastSecTimeRef.current) / 1000;
+        if (elapsedSec >= 1.0) {
+          const currentTps = Math.round(windowTicksRef.current / elapsedSec);
+          setTicksPerSec(currentTps);
+          windowTicksRef.current = 0;
+          lastSecTimeRef.current = now;
+        }
+      } catch {
+        // Transient network error
+      }
+    };
+
+    const effectiveInterval = Math.max(250, intervalMs);
+    pollerTimerRef.current = setInterval(pollLatestExchangeCandle, effectiveInterval);
+    pollLatestExchangeCandle();
+
+    return () => {
+      if (pollerTimerRef.current) {
+        clearInterval(pollerTimerRef.current);
+      }
+    };
+  }, [enabled, isPaused, intervalMs, timeframeSeconds, handleAuthoritativeTick]);
+
+  const togglePause = useCallback(() => {
+    setIsPaused((prev) => !prev);
+  }, []);
+
+  return {
+    status: isPaused ? 'paused' : status,
+    intervalMs,
+    setIntervalMs,
+    latestTick,
+    tickCount,
+    ticksPerSec,
+    latencyMs,
+    lastTickDate,
+    isPaused,
+    togglePause,
+  };
+}

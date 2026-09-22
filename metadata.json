@@ -1,0 +1,6 @@
+{
+  "name": "Binomo TradingView Chart",
+  "description": "Real-time TradingView candlestick chart for Binomo Crypto IDX (Z-CRY/IDX) with technical indicators and price analysis.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
