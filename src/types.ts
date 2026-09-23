@@ -14,6 +14,7 @@ export interface BinomoApiResponse {
     targetUrl: string;
     fetchedAt: string;
     candleCount: number;
+    isFallback?: boolean;
   };
 }
 

@@ -1,5 +1,3 @@
-import { getBinomoDatetimeForInterval } from '../../src/services/binomoApi';
-
 interface BinomoCandle {
   open: number;
   high: number;
@@ -14,6 +12,35 @@ interface CachedEntry {
 }
 
 const memoryCache = new Map<number, CachedEntry>();
+
+function getBinomoDatetimeForInterval(interval: number, now = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, '0');
+  const y = now.getUTCFullYear();
+  const m = pad(now.getUTCMonth() + 1);
+  const d = pad(now.getUTCDate());
+  const h = now.getUTCHours();
+
+  if (interval <= 5) {
+    return `${y}-${m}-${d}T${pad(h)}:00:00`;
+  } else if (interval <= 15) {
+    const chunkH = Math.floor(h / 4) * 4;
+    return `${y}-${m}-${d}T${pad(chunkH)}:00:00`;
+  } else if (interval <= 30) {
+    const chunkH = Math.floor(h / 12) * 12;
+    return `${y}-${m}-${d}T${pad(chunkH)}:00:00`;
+  } else if (interval <= 60) {
+    return `${y}-${m}-${d}T00:00:00`;
+  } else if (interval <= 300) {
+    const daysBack = now.getUTCDay();
+    const sunday = new Date(now.getTime() - daysBack * 86400000);
+    const sy = sunday.getUTCFullYear();
+    const sm = pad(sunday.getUTCMonth() + 1);
+    const sd = pad(sunday.getUTCDate());
+    return `${sy}-${sm}-${sd}T00:00:00`;
+  } else {
+    return `${y}-${m}-01T00:00:00`;
+  }
+}
 
 export default async function handler(req: any, res?: any) {
   const isNode = res && typeof res.status === 'function';
@@ -50,9 +77,9 @@ export default async function handler(req: any, res?: any) {
     const intervalNum = parseInt(interval, 10) || 60;
     const now = Date.now();
 
-    // Check fast memory cache (under 400ms old)
+    // Check fast memory cache (under 300ms old)
     const cached = memoryCache.get(intervalNum);
-    if (cached && now - cached.timestamp < 400) {
+    if (cached && now - cached.timestamp < 300) {
       const responsePayload = {
         success: true,
         interval: intervalNum,

@@ -1287,6 +1287,13 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
       if (lastCandleTimeRef.current && tick.time < lastCandleTimeRef.current) {
         return;
       }
+
+      // Outlier protection against canvas corruption
+      const baseline = animCandleRef.current.targetClose > 0 ? animCandleRef.current.targetClose : (candlesRef.current[candlesRef.current.length - 1]?.close || 0);
+      if (baseline > 0 && Math.abs(tick.close - baseline) / baseline > 0.02) {
+        return;
+      }
+
       lastCandleTimeRef.current = Math.max(lastCandleTimeRef.current, tick.time);
 
       const tickTime = tick.time as any;
@@ -1386,10 +1393,18 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
       if (!tick || typeof tick.time !== 'number' || isNaN(tick.time)) return;
       if (typeof tick.close !== 'number' || isNaN(tick.close)) return;
 
+      const anim = animCandleRef.current;
+
+      // Price Sanity Shield: reject rogue ticks that jump by > 2% from current candle baseline
+      const baselinePrice = anim.targetClose > 0 ? anim.targetClose : (candlesRef.current[candlesRef.current.length - 1]?.close || 0);
+      if (baselinePrice > 0 && Math.abs(tick.close - baselinePrice) / baselinePrice > 0.02) {
+        console.warn('[TradingViewChart] Suppressed anomalous outlier tick:', tick.close, 'vs baseline:', baselinePrice);
+        return;
+      }
+
       const tickKey = `${tick.time}_${tick.close}_${tick.tickIndex || 0}_${tick.serverTimestamp || 0}`;
       lastProcessedTickRef.current = tickKey;
 
-      const anim = animCandleRef.current;
       if (anim.time > 0 && tick.time < anim.time) {
         return; // Ignore stale or older ticks from previous intervals
       }

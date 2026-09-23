@@ -107,8 +107,22 @@ export default function App() {
         });
 
         if (isBackground) {
-          // Merge background synced candles instead of overwriting prepended historical candles
+          // If background sync returned fallback synthetic data while we already have candles, DO NOT pollute
+          if (result.rawResponse?._meta?.isFallback) {
+            return;
+          }
+
           const existingList = candlesRef.current;
+
+          // Safety check: verify incoming candles are in the same price range as existing candles
+          if (existingList.length > 0 && result.candles.length > 0) {
+            const lastExisting = existingList[existingList.length - 1];
+            const firstIncoming = result.candles[0];
+            if (Math.abs(firstIncoming.close - lastExisting.close) / lastExisting.close > 0.02) {
+              console.warn('Background sync price discontinuity detected; discarding mismatched batch');
+              return;
+            }
+          }
           
           // Map synced candles for rapid key matching
           const syncedMap = new Map(result.candles.map((c) => [c.time, c]));

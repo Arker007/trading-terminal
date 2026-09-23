@@ -37,6 +37,7 @@ export function useRealtimeBinomo({
   const pollerTimerRef = useRef<any>(null);
 
   // Backend endpoint availability trackers to prevent continuous 404 flooding
+  const activeLatestUrlRef = useRef<string>('/api/binomo/latest');
   const latestEndpointAvailableRef = useRef<boolean>(true);
   const failedPollCountRef = useRef<number>(0);
   const lastProbeTimeRef = useRef<number>(0);
@@ -207,9 +208,21 @@ export function useRealtimeBinomo({
     const alignedTime = Math.floor(nowSec / timeframeSeconds) * timeframeSeconds;
     const isNew = alignedTime > current.time;
 
-    // Realistic micro-tick price variation (approx 0.005% - 0.02%)
-    const delta = (Math.random() - 0.495) * (current.close * 0.00018);
-    const newClose = Math.max(1, current.close + delta);
+    // Determine the natural tick scale from the candle's spread or natural decimal precision
+    const naturalSpread = Math.abs(current.high - current.low);
+    const tickScale = naturalSpread > 0 && naturalSpread < 0.0005 
+      ? naturalSpread * 0.12 
+      : 0.00000010;
+
+    const delta = (Math.random() - 0.495) * tickScale;
+    const targetClose = Number((current.close + delta).toFixed(8));
+    
+    // Safety clamp: prevent simulated tick from ever deviating wildly from current open
+    const maxDeviation = Math.max(0.000002, Math.abs(current.open) * 0.000005);
+    const newClose = Math.min(
+      current.open + maxDeviation,
+      Math.max(current.open - maxDeviation, targetClose)
+    );
 
     if (isNew) {
       const tick: LiveTick = {
@@ -283,7 +296,13 @@ export function useRealtimeBinomo({
 
       try {
         const start = Date.now();
-        const res = await fetch(`/api/binomo/latest?interval=${timeframeSeconds}`);
+        let res = await fetch(`${activeLatestUrlRef.current}?interval=${timeframeSeconds}`);
+
+        // If nested route returned 404, try flat route /api/latest
+        if (res.status === 404 && activeLatestUrlRef.current === '/api/binomo/latest') {
+          activeLatestUrlRef.current = '/api/latest';
+          res = await fetch(`${activeLatestUrlRef.current}?interval=${timeframeSeconds}`);
+        }
 
         if (res.status === 404) {
           failedPollCountRef.current++;

@@ -92,22 +92,25 @@ export interface FetchCandlesParams {
 export function generateFallbackCandles(
   interval: number = DEFAULT_INTERVAL,
   count: number = 300,
-  basePrice: number = 641.8674
+  basePrice: number = 641.867420
 ): FormattedCandle[] {
   const candles: FormattedCandle[] = [];
   const nowInSec = Math.floor(Date.now() / 1000);
   const alignedNow = Math.floor(nowInSec / interval) * interval;
   let currentPrice = basePrice;
 
+  // Realistic natural tick scale for Crypto IDX (1e-7 range)
+  const stepScale = 0.00000015;
+
   for (let i = count - 1; i >= 0; i--) {
     const time = alignedNow - i * interval;
-    const delta = (Math.random() - 0.498) * (basePrice * 0.0003);
+    const delta = (Math.random() - 0.495) * stepScale;
     const open = currentPrice;
-    currentPrice = Math.max(10, currentPrice + delta);
+    currentPrice = Number((currentPrice + delta).toFixed(8));
     const close = currentPrice;
-    const spread = Math.abs(delta) * (1 + Math.random());
-    const high = Math.max(open, close) + Math.random() * spread;
-    const low = Math.min(open, close) - Math.random() * spread;
+    const spread = Math.abs(delta) * (1 + Math.random()) + 0.0000001;
+    const high = Number((Math.max(open, close) + Math.random() * spread).toFixed(8));
+    const low = Number((Math.min(open, close) - Math.random() * spread).toFixed(8));
     const volume = Math.max(1, Math.round(Math.abs(high - low) * 1e8 + Math.abs(close - open) * 1e8));
 
     candles.push({
@@ -147,19 +150,32 @@ export async function fetchBinomoCandles(params?: FetchCandlesParams): Promise<{
     if (res.ok) {
       rawData = await res.json();
     } else {
+      // If nested route returned 404, try root alias route /api/candles
+      if (res.status === 404) {
+        try {
+          const flatUrl = queryUrl.replace('/api/binomo/candles', '/api/candles');
+          const flatRes = await fetch(flatUrl);
+          if (flatRes.ok) {
+            rawData = await flatRes.json();
+          }
+        } catch {}
+      }
+
       // If backend proxy route returned 404 or non-200, try direct upstream fetch as resilient fallback
-      try {
-        const directRes = await fetch(canonicalUrl, {
-          headers: {
-            'Accept': 'application/json, text/plain, */*',
-          },
-          signal: AbortSignal.timeout(5000),
-        });
-        if (directRes.ok) {
-          rawData = await directRes.json();
+      if (!rawData) {
+        try {
+          const directRes = await fetch(canonicalUrl, {
+            headers: {
+              'Accept': 'application/json, text/plain, */*',
+            },
+            signal: AbortSignal.timeout(5000),
+          });
+          if (directRes.ok) {
+            rawData = await directRes.json();
+          }
+        } catch {
+          // Direct browser CORS restriction or network failure
         }
-      } catch {
-        // Direct browser CORS restriction or network failure
       }
 
       if (!rawData) {
@@ -250,6 +266,7 @@ export async function fetchBinomoCandles(params?: FetchCandlesParams): Promise<{
       targetUrl: customUrl || canonicalUrl,
       fetchedAt: new Date().toISOString(),
       candleCount: fallbackCandles.length,
+      isFallback: true,
     },
   };
 
