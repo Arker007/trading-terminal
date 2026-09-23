@@ -29,6 +29,17 @@ async function startServer() {
 
   app.use(express.json());
 
+  // Permissive CORS middleware for dev and external previews
+  app.use((req, res, next) => {
+    res.setHeader("Access-Control-Allow-Origin", "*");
+    res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With");
+    if (req.method === "OPTIONS") {
+      return res.sendStatus(200);
+    }
+    next();
+  });
+
   // Real-time state
   let latestCandle: TickPayload | null = null;
   const latestCandles = new Map<number, TickPayload>();

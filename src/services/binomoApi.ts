@@ -147,18 +147,47 @@ export async function fetchBinomoCandles(params?: FetchCandlesParams): Promise<{
     if (res.ok) {
       rawData = await res.json();
     } else {
-      console.warn(`Proxy candles request returned status ${res.status}`);
+      // If backend proxy route returned 404 or non-200, try direct upstream fetch as resilient fallback
       try {
-        const errorJson = await res.json();
-        if (errorJson?.data && Array.isArray(errorJson.data)) {
-          rawData = errorJson;
+        const directRes = await fetch(canonicalUrl, {
+          headers: {
+            'Accept': 'application/json, text/plain, */*',
+          },
+          signal: AbortSignal.timeout(5000),
+        });
+        if (directRes.ok) {
+          rawData = await directRes.json();
         }
       } catch {
-        // ignore parse error
+        // Direct browser CORS restriction or network failure
+      }
+
+      if (!rawData) {
+        try {
+          const errorJson = await res.json();
+          if (errorJson?.data && Array.isArray(errorJson.data)) {
+            rawData = errorJson;
+          }
+        } catch {
+          // ignore parse error
+        }
       }
     }
   } catch (proxyError) {
-    console.warn('Backend proxy fetch failed:', proxyError);
+    // If local proxy call failed, try direct fetch
+    try {
+      const directRes = await fetch(canonicalUrl, {
+        headers: {
+          'Accept': 'application/json, text/plain, */*',
+        },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (directRes.ok) {
+        rawData = await directRes.json();
+      }
+    } catch {
+      // ignore
+    }
   }
 
   // If proxy fetch succeeded and has valid data array
