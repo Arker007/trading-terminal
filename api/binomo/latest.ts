@@ -97,9 +97,10 @@ export default async function handler(req: any, res?: any) {
       });
     }
 
-    const targetDate = getBinomoDatetimeForInterval(intervalNum);
+    const upstreamInterval = intervalNum > 60 ? 60 : intervalNum;
+    const targetDate = getBinomoDatetimeForInterval(upstreamInterval);
     const encodedAsset = encodeURIComponent(asset);
-    const url = `https://api.binomo.com/candles/v1/${encodedAsset}/${targetDate}/${intervalNum}?locale=en`;
+    const url = `https://api.binomo.com/candles/v1/${encodedAsset}/${targetDate}/${upstreamInterval}?locale=en`;
 
     const upstreamResponse = await fetch(url, {
       headers: {

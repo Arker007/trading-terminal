@@ -137,7 +137,13 @@ export const ChartHeader: React.FC<ChartHeaderProps> = ({
   const sessionPercent = firstCandle && firstCandle.open !== 0 ? (sessionChange / firstCandle.open) * 100 : 0;
   const isPositive = sessionChange >= 0;
 
-  const activeIndicatorsCount = Object.values(indicators).filter(Boolean).length;
+  const activeIndicatorsCount = [
+    indicators.showSma20,
+    indicators.showEma50,
+    indicators.showBollingerBands,
+    indicators.showVolume,
+    indicators.showHighLowLevels,
+  ].filter(Boolean).length;
 
   return (
     <header
@@ -379,9 +385,9 @@ export const ChartHeader: React.FC<ChartHeaderProps> = ({
           <button
             id="btn-indicators-modal"
             onClick={onOpenIndicators}
-            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 dark:border-[#2a2e39] bg-slate-50 dark:bg-[#131722] hover:bg-slate-100 dark:hover:bg-[#2a2e39] text-slate-750 dark:text-[#d1d4dc] transition-colors cursor-pointer"
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border border-slate-200 dark:border-[#2a2e39] bg-slate-50 dark:bg-[#131722] hover:bg-slate-100 dark:hover:bg-[#2a2e39] text-slate-750 dark:text-[#d1d4dc] transition-colors cursor-pointer whitespace-nowrap shrink-0"
           >
-            <Sliders className="w-3.5 h-3.5 text-blue-500" />
+            <Sliders className="w-3.5 h-3.5 text-blue-500 shrink-0" />
             <span>Indicators</span>
             {activeIndicatorsCount > 0 && (
               <Badge variant="primary" className="py-0 px-1.5 text-[10px] min-w-4 h-4 flex items-center justify-center font-bold">
@@ -397,16 +403,16 @@ export const ChartHeader: React.FC<ChartHeaderProps> = ({
             <button
               id="btn-pine-editor-modal"
               onClick={onOpenPineEditor}
-              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all cursor-pointer ${
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition-all cursor-pointer whitespace-nowrap shrink-0 ${
                 hasActivePineScript
                   ? 'border-blue-500/40 bg-blue-500/10 text-blue-500 font-bold'
                   : 'border-slate-200 dark:border-[#2a2e39] bg-slate-50 dark:bg-[#131722] hover:bg-slate-100 dark:hover:bg-[#2a2e39] text-slate-700 dark:text-[#d1d4dc]'
               }`}
             >
-              <Code2 className="w-3.5 h-3.5 text-blue-500" />
+              <Code2 className="w-3.5 h-3.5 text-blue-500 shrink-0" />
               <span>Pine Editor</span>
               {hasActivePineScript && (
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
               )}
             </button>
           </Tooltip>

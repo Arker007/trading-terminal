@@ -81,6 +81,91 @@ export default async function handler(req: any, res?: any) {
     const defaultDate = getBinomoDatetimeForInterval(intervalNum);
     const targetDate = date || defaultDate;
 
+    if (intervalNum > 60 && !customUrl) {
+      const encodedAsset = encodeURIComponent(asset);
+      const reqDate = new Date(targetDate.endsWith('Z') ? targetDate : targetDate + 'Z');
+      const daysToFetch = intervalNum >= 3600 ? 5 : intervalNum >= 900 ? 3 : 2;
+      const all60sCandles: BinomoCandle[] = [];
+
+      const pad = (n: number) => String(n).padStart(2, '0');
+      for (let i = daysToFetch - 1; i >= 0; i--) {
+        const d = new Date(reqDate.getTime() - i * 86400000);
+        const dateStr = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}T00:00:00`;
+        const dayUrl = `https://api.binomo.com/candles/v1/${encodedAsset}/${dateStr}/60?locale=${locale}`;
+        try {
+          const dayResp = await fetch(dayUrl, {
+            headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)',
+              'Accept': 'application/json, text/plain, */*',
+            },
+            signal: AbortSignal.timeout(6000),
+          });
+          if (dayResp.ok) {
+            const dayJson = await dayResp.json();
+            if (Array.isArray(dayJson?.data)) {
+              all60sCandles.push(...dayJson.data);
+            }
+          }
+        } catch {}
+      }
+
+      const seen = new Set<string>();
+      const unique60s: BinomoCandle[] = [];
+      for (const c of all60sCandles) {
+        if (!seen.has(c.created_at)) {
+          seen.add(c.created_at);
+          unique60s.push(c);
+        }
+      }
+      unique60s.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+
+      // Aggregate into target interval
+      const candleMap = new Map<number, BinomoCandle>();
+      for (const c of unique60s) {
+        const timeInSec = Math.floor(new Date(c.created_at).getTime() / 1000);
+        const bucket = Math.floor(timeInSec / intervalNum) * intervalNum;
+        const existing = candleMap.get(bucket);
+        if (!existing) {
+          candleMap.set(bucket, {
+            open: Number(c.open),
+            high: Number(c.high),
+            low: Number(c.low),
+            close: Number(c.close),
+            created_at: new Date(bucket * 1000).toISOString(),
+          });
+        } else {
+          existing.high = Math.max(existing.high, Number(c.high));
+          existing.low = Math.min(existing.low, Number(c.low));
+          existing.close = Number(c.close);
+        }
+      }
+      const aggregated = Array.from(candleMap.values()).sort(
+        (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+      );
+
+      const resultData = {
+        data: aggregated,
+        errors: [],
+        success: true,
+        _meta: {
+          targetUrl: `https://api.binomo.com/candles/v1/${encodedAsset}/${targetDate}/${intervalNum}?locale=${locale}`,
+          fetchedAt: new Date().toISOString(),
+          candleCount: aggregated.length,
+          isSynthesized: true,
+          sourceInterval: 60,
+        },
+      };
+
+      if (isNode) {
+        Object.entries(corsHeaders).forEach(([k, v]) => res.setHeader(k, v));
+        return res.status(200).json(resultData);
+      }
+      return new Response(JSON.stringify(resultData), {
+        status: 200,
+        headers: corsHeaders,
+      });
+    }
+
     let targetUrl = customUrl;
     if (!targetUrl) {
       const encodedAsset = encodeURIComponent(asset);

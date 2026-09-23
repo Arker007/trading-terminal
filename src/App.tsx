@@ -12,7 +12,6 @@ import {
   LegendValues,
   BinomoApiResponse,
   LiveTick,
-  UpdateIntervalOption,
 } from './types';
 import {
   DEFAULT_BINOMO_URL,
@@ -26,6 +25,7 @@ import { useRealtimeBinomo } from './services/useRealtimeBinomo';
 import { TradingViewChart } from './components/TradingViewChart';
 import { ChartHeader } from './components/ChartHeader';
 import { IndicatorsMenu } from './components/IndicatorsMenu';
+import { IndicatorSettingsModal } from './components/IndicatorSettingsModal';
 import { ApiModal } from './components/ApiModal';
 import { MarketStatsBar } from './components/MarketStatsBar';
 import { PineEditor } from './components/PineEditor';
@@ -41,8 +41,12 @@ export default function App() {
   const [theme, setTheme] = useState<ChartTheme>('dark');
   const [indicators, setIndicators] = useState<IndicatorSettings>({
     showSma20: false,
+    smaPeriod: 20,
     showEma50: false,
+    emaPeriod: 50,
     showBollingerBands: false,
+    bbPeriod: 20,
+    bbStdDev: 2,
     showVolume: true,
     showHighLowLevels: true,
   });
@@ -51,6 +55,8 @@ export default function App() {
   const [error, setError] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
   const [isIndicatorsOpen, setIsIndicatorsOpen] = useState<boolean>(false);
+  const [indicatorSettingsTarget, setIndicatorSettingsTarget] = useState<'sma' | 'ema' | 'bb' | null>(null);
+  const [isIndicatorSettingsOpen, setIsIndicatorSettingsOpen] = useState<boolean>(false);
   const [isApiModalOpen, setIsApiModalOpen] = useState<boolean>(false);
   const [isPineEditorOpen, setIsPineEditorOpen] = useState<boolean>(false);
   const [pineResult, setPineResult] = useState<PineExecutionResult | null>(null);
@@ -66,6 +72,8 @@ export default function App() {
   const fastTickRef = useRef<((tick: LiveTick) => void) | null>(null);
   const appContainerRef = useRef<HTMLDivElement>(null);
   const candlesRef = useRef<FormattedCandle[]>([]);
+  const activeTimeframeRef = useRef<number>(DEFAULT_INTERVAL);
+  activeTimeframeRef.current = currentTimeframe;
 
   // Sync dark class with DOM
   useEffect(() => {
@@ -95,6 +103,7 @@ export default function App() {
   // Load candles from Binomo API (Historical baseline)
   const loadCandles = useCallback(
     async (isBackground = false) => {
+      const requestedInterval = currentTimeframe;
       if (!isBackground) {
         setIsLoading(true);
       }
@@ -102,9 +111,14 @@ export default function App() {
 
       try {
         const result = await fetchBinomoCandles({
-          interval: currentTimeframe,
+          interval: requestedInterval,
           customUrl: customAppliedUrl || undefined,
         });
+
+        // Guard against race conditions if user rapidly switched timeframe while fetch was in flight
+        if (activeTimeframeRef.current !== requestedInterval) {
+          return;
+        }
 
         if (isBackground) {
           // If background sync returned fallback synthetic data while we already have candles, DO NOT pollute
@@ -114,16 +128,6 @@ export default function App() {
 
           const existingList = candlesRef.current;
 
-          // Safety check: verify incoming candles are in the same price range as existing candles
-          if (existingList.length > 0 && result.candles.length > 0) {
-            const lastExisting = existingList[existingList.length - 1];
-            const firstIncoming = result.candles[0];
-            if (Math.abs(firstIncoming.close - lastExisting.close) / lastExisting.close > 0.02) {
-              console.warn('Background sync price discontinuity detected; discarding mismatched batch');
-              return;
-            }
-          }
-          
           // Map synced candles for rapid key matching
           const syncedMap = new Map(result.candles.map((c) => [c.time, c]));
           
@@ -154,11 +158,15 @@ export default function App() {
         }
         setLastUpdated(new Date());
       } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : 'Error fetching candle data';
-        console.error('Failed to load Binomo candles:', err);
-        setError(message);
+        if (activeTimeframeRef.current === requestedInterval) {
+          const message = err instanceof Error ? err.message : 'Error fetching candle data';
+          console.error('Failed to load Binomo candles:', err);
+          setError(message);
+        }
       } finally {
-        setIsLoading(false);
+        if (activeTimeframeRef.current === requestedInterval) {
+          setIsLoading(false);
+        }
       }
     },
     [currentTimeframe, customAppliedUrl]
@@ -177,25 +185,23 @@ export default function App() {
     return () => clearInterval(syncTimer);
   }, [loadCandles]);
 
-  // Safe key identifying market candle data changes
-  const candleDataVersion = candles.length > 0 ? `${candles.length}-${candles[candles.length - 1].time}` : '';
+  // Safe key identifying market candle data changes and timeframe switches
+  const candleDataVersion =
+    candles.length > 0
+      ? `${currentTimeframe}_${candles.length}_${candles[0]?.time}_${candles[candles.length - 1]?.time}`
+      : '';
 
-  // Keep Pine Script calculations updated whenever candles update or active script changes
+  // Keep Pine Script calculations updated whenever candles update, timeframe changes, or active script changes
   useEffect(() => {
-    if (activePineCode && candles && candles.length > 0) {
+    if (activePineCode && candles && candles.length > 0 && !isLoading) {
       try {
-        console.log('[PineScript Flow] 2. Re-evaluating active Pine script on market candle update...', {
-          candleDataVersion,
-          candlesCount: candles.length,
-          scriptCodeLength: activePineCode.length,
-        });
-        const res = executePineScript(activePineCode, candles);
+        const res = executePineScript(activePineCode, candles, currentTimeframe);
         setPineResult(res);
       } catch (err) {
-        console.warn('[PineScript Flow] Pine Script re-execution warning:', err);
+        console.warn('Pine Script re-execution warning:', err);
       }
     }
-  }, [candleDataVersion, activePineCode]);
+  }, [candleDataVersion, activePineCode, currentTimeframe, isLoading]);
 
   // Handle clearing the Pine script result when activePineCode becomes falsy
   useEffect(() => {
@@ -221,26 +227,24 @@ export default function App() {
     togglePause: toggleRealtimePause,
   } = useRealtimeBinomo({
     enabled: true,
-    initialIntervalMs: 500, // Default: update per 500 ms for steady candle movement
+    initialIntervalMs: 500,
     timeframeSeconds: currentTimeframe,
     initialCandles: candles,
     onTick: (tick) => {
       try {
-        // 1. Direct hardware dispatch to chart canvas series.update()
+        // Only dispatch and append ticks if the current dataset is ready
         fastTickRef.current?.(tick);
 
-        // 2. Maintain candles memory reference for statistics
         const list = candlesRef.current;
         if (list && list.length > 0) {
           const last = list[list.length - 1];
           if (last && last.time === tick.time) {
-            last.open = tick.open; // Strictly preserve authoritative exchange open
+            last.open = tick.open;
             last.close = tick.close;
             last.high = Math.max(last.high, tick.high);
             last.low = Math.min(last.low, tick.low);
             last.volume = tick.volume;
           } else if (last && tick.time > last.time) {
-            // New candle rollover
             list.push({
               time: tick.time,
               open: tick.open,
@@ -268,9 +272,7 @@ export default function App() {
             .then(() => {
               setIsFullscreen(true);
             })
-            .catch(() => {
-              // Iframe or browser permissions restricted
-            });
+            .catch(() => {});
         }
       } else {
         if (document.exitFullscreen) {
@@ -279,14 +281,10 @@ export default function App() {
             .then(() => {
               setIsFullscreen(false);
             })
-            .catch(() => {
-              // Ignore exit fullscreen rejection
-            });
+            .catch(() => {});
         }
       }
-    } catch {
-      // Ignore fullscreen synchronous errors
-    }
+    } catch {}
   };
 
   useEffect(() => {
@@ -301,12 +299,12 @@ export default function App() {
     if (isHistoryLoading || isLoading) return;
 
     const currentList = candlesRef.current;
+    if (!currentList || currentList.length < 10) return;
     const oldestCandle = currentList[0];
     if (!oldestCandle) return;
 
     const oldestTime = oldestCandle.time;
 
-    // Resolve the current chunk date, then step back by 1 second past its boundary to target the preceding chunk
     const currentChunkDate = getBinomoDatetimeForInterval(currentTimeframe, new Date(oldestTime * 1000));
     const currentChunkUtc = new Date(currentChunkDate + 'Z');
     const prevTime = currentChunkUtc.getTime() - 1000;
@@ -318,7 +316,6 @@ export default function App() {
     }
 
     setIsHistoryLoading(true);
-    console.log(`[Historical Pagination] Requesting older candles for date: ${prevChunkDate}, interval: ${currentTimeframe}`);
 
     try {
       const result = await fetchBinomoCandles({
@@ -329,19 +326,16 @@ export default function App() {
       const newCandles = result.candles;
 
       if (!newCandles || newCandles.length === 0) {
-        console.log(`[Historical Pagination] No older candles found in chunk ${chunkKey}`);
         exhaustedChunksRef.current.add(chunkKey);
         setIsHistoryLoading(false);
         return;
       }
 
-      // De-duplicate timestamps against the current series state
       const latestList = candlesRef.current;
       const existingTimes = new Set(latestList.map((c) => c.time));
       const filteredNew = newCandles.filter((c) => !existingTimes.has(c.time));
 
       if (filteredNew.length === 0) {
-        console.log(`[Historical Pagination] All retrieved candles from ${chunkKey} already exist in state`);
         exhaustedChunksRef.current.add(chunkKey);
         setIsHistoryLoading(false);
         return;
@@ -350,12 +344,10 @@ export default function App() {
       const combined = [...filteredNew, ...latestList];
       combined.sort((a, b) => a.time - b.time);
 
-      console.log(`[Historical Pagination] Successfully prepended ${filteredNew.length} older candles. Total count: ${combined.length}`);
-
       candlesRef.current = combined;
       setCandles(combined);
     } catch (err) {
-      console.error('[Historical Pagination] Error fetching preceding chunk:', err);
+      console.error('Error fetching older candle chunk:', err);
       exhaustedChunksRef.current.add(chunkKey);
     } finally {
       setIsHistoryLoading(false);
@@ -363,9 +355,12 @@ export default function App() {
   }, [currentTimeframe, isHistoryLoading, isLoading]);
 
   const handleTimeframeChange = (seconds: number) => {
+    if (seconds === currentTimeframe) return;
     exhaustedChunksRef.current.clear();
     setCurrentTimeframe(seconds);
     setCustomAppliedUrl(null);
+    setPineResult(null);
+    setIsLoading(true);
     const newUrl = buildBinomoUrl(DEFAULT_ASSET, seconds);
     setTargetUrl(newUrl);
   };
@@ -384,7 +379,7 @@ export default function App() {
         theme === 'dark' ? 'dark bg-[#131722] text-[#d1d4dc]' : 'bg-[#ffffff] text-slate-900'
       }`}
     >
-      {/* Top TradingView Chart Header with 1ms Speed selector & Real-Time controls */}
+      {/* Top TradingView Chart Header */}
       <ChartHeader
         assetSymbol={DEFAULT_ASSET}
         candles={candles}
@@ -459,7 +454,7 @@ export default function App() {
           </div>
         )}
 
-        {/* TradingView Chart Instance with Direct 1ms series.update() Fast Pipeline & Pine Overlays */}
+        {/* TradingView Chart Instance */}
         <TradingViewChart
           candles={candles}
           chartType={chartType}
@@ -474,12 +469,16 @@ export default function App() {
           pineResult={pineResult}
           onRemovePineScript={() => setPineResult(null)}
           onOpenPineEditor={() => setIsPineEditorOpen(true)}
+          onConfigureIndicator={(target) => {
+            setIndicatorSettingsTarget(target);
+            setIsIndicatorSettingsOpen(true);
+          }}
           isHistoryLoading={isHistoryLoading}
           onLoadMore={loadOlderCandles}
         />
       </main>
 
-      {/* Market Stats & 1ms Real-Time Rate Bar with Pine Editor trigger */}
+      {/* Market Stats & Real-Time Rate Bar */}
       <MarketStatsBar
         candles={candles}
         lastUpdated={lastUpdated}
@@ -499,14 +498,9 @@ export default function App() {
         isOpen={isPineEditorOpen}
         onClose={() => setIsPineEditorOpen(false)}
         candles={candles}
+        currentTimeframe={currentTimeframe}
         activeExecutionResult={pineResult}
         onApplyScriptResult={(result, code) => {
-          console.log('[PineScript Flow] 2a. onApplyScriptResult received in App:', {
-            hasResult: !!result,
-            scriptName: result?.scriptName,
-            plotsCount: result?.plots?.length || 0,
-            markersCount: result?.markers?.length || 0,
-          });
           setPineResult(result);
           setActivePineCode(code);
         }}
@@ -519,6 +513,15 @@ export default function App() {
         onClose={() => setIsIndicatorsOpen(false)}
         indicators={indicators}
         onChange={setIndicators}
+      />
+
+      {/* Indicator Parameter Settings Modal */}
+      <IndicatorSettingsModal
+        isOpen={isIndicatorSettingsOpen}
+        onClose={() => setIsIndicatorSettingsOpen(false)}
+        indicators={indicators}
+        targetIndicator={indicatorSettingsTarget}
+        onSave={setIndicators}
       />
 
       {/* Binomo API Inspector Modal */}

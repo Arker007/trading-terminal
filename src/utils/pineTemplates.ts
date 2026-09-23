@@ -4,6 +4,7 @@ export const PINE_TEMPLATES: PineTemplate[] = [
   {
     id: 'custom-indicator',
     title: 'Custom Indicator Starter (SMA + EMA + Signals)',
+    shortTitle: 'SMA + EMA Signals',
     description: 'A clean starting template with customizable moving averages, crossover signal markers, and reference lines.',
     type: 'indicator',
     category: 'Custom',
@@ -34,6 +35,7 @@ plotshape(sellSignal, title="Sell Signal", style=shape.triangledown, location=lo
   {
     id: 'ema-cross-strategy',
     title: 'EMA Golden Cross & Ribbon Strategy',
+    shortTitle: 'EMA Ribbon Strategy',
     description: 'Trend-following strategy using Fast (9) and Slow (21) Exponential Moving Average crossovers with automated backtest statistics.',
     type: 'strategy',
     category: 'Strategies',
@@ -73,6 +75,7 @@ plotshape(bearishCross, title="Sell Signal", style=shape.triangledown, location=
   {
     id: 'supertrend-pro',
     title: 'SuperTrend Trend Tracker',
+    shortTitle: 'SuperTrend Pro',
     description: 'ATR volatility-based trend reversal detector that plots active support/resistance trendlines.',
     type: 'indicator',
     category: 'Trend',
@@ -99,6 +102,7 @@ plotshape(trendReversalDown, title="Bearish SuperTrend", style=shape.triangledow
   {
     id: 'rsi-divergence',
     title: 'RSI Multi-Level Oscillator',
+    shortTitle: 'RSI Oscillator',
     description: 'Relative Strength Index momentum oscillator with Overbought (70) and Oversold (30) levels.',
     type: 'indicator',
     category: 'Momentum',
@@ -122,6 +126,7 @@ hline(30, "Oversold", color=color.rgb(34, 197, 94), linestyle=hline.style_dashed
   {
     id: 'bollinger-breakout',
     title: 'Bollinger Bands & Mean Reversion Strategy',
+    shortTitle: 'Bollinger Bands',
     description: 'Standard deviation volatility envelopes with buy on lower band dip and sell on upper band touch.',
     type: 'strategy',
     category: 'Strategies',
@@ -154,6 +159,7 @@ plotshape(sellSignal, title="BB Sell", style=shape.triangledown, location=locati
   {
     id: 'macd-pro',
     title: 'MACD Momentum Oscillator',
+    shortTitle: 'MACD Pro',
     description: 'Moving Average Convergence Divergence with MACD line, 9-period Signal line, and color-coded momentum histogram.',
     type: 'indicator',
     category: 'Momentum',
@@ -176,6 +182,7 @@ hline(0, "Zero Line", color=color.rgb(148, 163, 184), linestyle=hline.style_dott
   {
     id: 'binomo-scalper-breakout',
     title: 'Binomo Crypto Scalper (Fast Momentum)',
+    shortTitle: 'Crypto Scalper',
     description: 'Engineered specifically for fast Crypto IDX candles using rapid price breakouts and volume confirmation.',
     type: 'strategy',
     category: 'Strategies',
@@ -207,6 +214,7 @@ plotshape(bearTrigger, title="Scalp Short", style=shape.triangledown, location=l
   {
     id: 'stoch-cross',
     title: 'Stochastic Oscillator & Cross Signals',
+    shortTitle: 'Stoch Cross',
     description: 'Classic %K and %D Stochastic oscillator with crossover markers, overbought (80), and oversold (20) levels.',
     type: 'indicator',
     category: 'Momentum',
@@ -238,6 +246,7 @@ plotshape(crossDown, title="Bearish Stoch Cross", style=shape.triangledown, loca
   {
     id: 'custom-starter',
     title: 'Custom Indicator Boilerplate',
+    shortTitle: 'Boilerplate',
     description: 'Clean Pine Script template to build custom indicators, math formulas, and signals.',
     type: 'indicator',
     category: 'Custom',

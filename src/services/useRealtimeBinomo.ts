@@ -29,6 +29,8 @@ export function useRealtimeBinomo({
   const onTickRef = useRef(onTick);
   onTickRef.current = onTick;
 
+  const prevTimeframeRef = useRef<number>(timeframeSeconds);
+
   // Real-time tick engine references
   const activeCandleRef = useRef<FormattedCandle | null>(null);
   const tickCounterRef = useRef<number>(0);
@@ -42,6 +44,15 @@ export function useRealtimeBinomo({
   const failedPollCountRef = useRef<number>(0);
   const lastProbeTimeRef = useRef<number>(0);
   const sseErrorCountRef = useRef<number>(0);
+
+  // Reset active candle immediately if timeframe changes to avoid candle contamination
+  useEffect(() => {
+    if (prevTimeframeRef.current !== timeframeSeconds) {
+      prevTimeframeRef.current = timeframeSeconds;
+      activeCandleRef.current = null;
+      setLatestTick(null);
+    }
+  }, [timeframeSeconds]);
 
   // Synchronize initial candle baseline whenever history is loaded or timeframe changes
   useEffect(() => {
@@ -131,7 +142,6 @@ export function useRealtimeBinomo({
         });
       }
     }
-    // If alignedTime < current.time, ignore stale out-of-order tick
   }, [timeframeSeconds]);
 
   // 1. Connect to live Binomo SSE stream for the specific active timeframe
@@ -175,8 +185,6 @@ export function useRealtimeBinomo({
       es.onerror = () => {
         if (isCleanedUp) return;
         sseErrorCountRef.current++;
-        // If SSE fails multiple times (e.g. 404 on static hosts or serverless without persistent SSE),
-        // cleanly close EventSource so it doesn't repeatedly flood network errors in console
         if (sseErrorCountRef.current >= 2) {
           if (es) {
             es.close();
@@ -273,10 +281,8 @@ export function useRealtimeBinomo({
     }
 
     const pollLatestExchangeCandle = async () => {
-      // If backend endpoint previously returned 404, avoid hammering it every 500ms
       if (!latestEndpointAvailableRef.current) {
         const now = Date.now();
-        // Quietly probe once every 30 seconds to see if server /api has become active
         if (now - lastProbeTimeRef.current > 30000) {
           lastProbeTimeRef.current = now;
           try {
@@ -285,11 +291,8 @@ export function useRealtimeBinomo({
               latestEndpointAvailableRef.current = true;
               failedPollCountRef.current = 0;
             }
-          } catch {
-            // Still unavailable
-          }
+          } catch {}
         }
-        // Run simulated tick so chart continues to move smoothly without network 404 spam
         simulateMicroTick();
         return;
       }
@@ -298,7 +301,6 @@ export function useRealtimeBinomo({
         const start = Date.now();
         let res = await fetch(`${activeLatestUrlRef.current}?interval=${timeframeSeconds}`);
 
-        // If nested route returned 404, try flat route /api/latest
         if (res.status === 404 && activeLatestUrlRef.current === '/api/binomo/latest') {
           activeLatestUrlRef.current = '/api/latest';
           res = await fetch(`${activeLatestUrlRef.current}?interval=${timeframeSeconds}`);
@@ -327,7 +329,6 @@ export function useRealtimeBinomo({
           handleAuthoritativeTick(json.candle);
         }
 
-        // Update TPS meter
         const now = Date.now();
         const elapsedSec = (now - lastSecTimeRef.current) / 1000;
         if (elapsedSec >= 1.0) {
@@ -337,7 +338,6 @@ export function useRealtimeBinomo({
           lastSecTimeRef.current = now;
         }
       } catch {
-        // Transient network error, simulate tick
         simulateMicroTick();
       }
     };

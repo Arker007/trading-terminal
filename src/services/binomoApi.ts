@@ -30,20 +30,9 @@ export function getBinomoDatetimeForInterval(interval: number, now = new Date())
     // 30s: 12-hour chunk (00, 12)
     const chunkH = Math.floor(h / 12) * 12;
     return `${y}-${m}-${d}T${pad(chunkH)}:00:00`;
-  } else if (interval <= 60) {
-    // 60s (1m): daily midnight chunk
-    return `${y}-${m}-${d}T00:00:00`;
-  } else if (interval <= 300) {
-    // 300s (5m): multi-day Sunday chunk
-    const daysBack = now.getUTCDay();
-    const sunday = new Date(now.getTime() - daysBack * 86400000);
-    const sy = sunday.getUTCFullYear();
-    const sm = pad(sunday.getUTCMonth() + 1);
-    const sd = pad(sunday.getUTCDate());
-    return `${sy}-${sm}-${sd}T00:00:00`;
   } else {
-    // 15m, 1h: monthly chunk
-    return `${y}-${m}-01T00:00:00`;
+    // 60s (1m), 300s (5m), 900s (15m), 3600s (1h): daily midnight chunk
+    return `${y}-${m}-${d}T00:00:00`;
   }
 }
 
@@ -55,9 +44,7 @@ export function getPreviousChunkDate(interval: number, oldestSec: number): strin
   if (interval <= 5) stepSec = 3600;
   else if (interval <= 15) stepSec = 3600 * 4;
   else if (interval <= 30) stepSec = 3600 * 12;
-  else if (interval <= 60) stepSec = 86400;
-  else if (interval <= 300) stepSec = 86400 * 7;
-  else stepSec = 86400 * 30;
+  else stepSec = 86400;
 
   const targetDate = new Date((oldestSec - stepSec) * 1000);
   return getBinomoDatetimeForInterval(interval, targetDate);

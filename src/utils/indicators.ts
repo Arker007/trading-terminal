@@ -6,22 +6,28 @@ export interface IndicatorPoint {
 }
 
 /**
- * Computes Simple Moving Average (SMA)
+ * Computes Simple Moving Average (SMA) with adaptive warm-up for small datasets
  */
 export function calculateSMA(candles: FormattedCandle[], period: number = 20): IndicatorPoint[] {
   const result: IndicatorPoint[] = [];
-  if (candles.length < period) return result;
+  if (!candles || candles.length === 0) return result;
 
+  const effectivePeriod = Math.max(1, Math.min(period, candles.length));
+  
   let sum = 0;
   for (let i = 0; i < candles.length; i++) {
     sum += candles[i].close;
-    if (i >= period) {
-      sum -= candles[i - period].close;
-    }
-    if (i >= period - 1) {
+    if (i >= effectivePeriod) {
+      sum -= candles[i - effectivePeriod].close;
       result.push({
         time: candles[i].time,
-        value: sum / period,
+        value: sum / effectivePeriod,
+      });
+    } else {
+      // Warm-up average for initial bars so lines don't completely vanish on higher timeframes
+      result.push({
+        time: candles[i].time,
+        value: sum / (i + 1),
       });
     }
   }
@@ -29,21 +35,22 @@ export function calculateSMA(candles: FormattedCandle[], period: number = 20): I
 }
 
 /**
- * Computes Exponential Moving Average (EMA)
+ * Computes Exponential Moving Average (EMA) with adaptive warm-up for small datasets
  */
 export function calculateEMA(candles: FormattedCandle[], period: number = 50): IndicatorPoint[] {
   const result: IndicatorPoint[] = [];
-  if (candles.length < period) return result;
+  if (!candles || candles.length === 0) return result;
 
-  const k = 2 / (period + 1);
-  let ema = candles.slice(0, period).reduce((acc, c) => acc + c.close, 0) / period;
+  const effectivePeriod = Math.max(2, Math.min(period, candles.length));
+  const k = 2 / (effectivePeriod + 1);
 
+  let ema = candles[0].close;
   result.push({
-    time: candles[period - 1].time,
+    time: candles[0].time,
     value: ema,
   });
 
-  for (let i = period; i < candles.length; i++) {
+  for (let i = 1; i < candles.length; i++) {
     ema = candles[i].close * k + ema * (1 - k);
     result.push({
       time: candles[i].time,
@@ -55,7 +62,7 @@ export function calculateEMA(candles: FormattedCandle[], period: number = 50): I
 }
 
 /**
- * Computes Bollinger Bands (Middle, Upper, Lower)
+ * Computes Bollinger Bands (Middle, Upper, Lower) with adaptive calculation for small datasets
  */
 export function calculateBollingerBands(
   candles: FormattedCandle[],
@@ -66,14 +73,19 @@ export function calculateBollingerBands(
   const middle: IndicatorPoint[] = [];
   const lower: IndicatorPoint[] = [];
 
-  if (candles.length < period) {
+  if (!candles || candles.length === 0) {
     return { upper, middle, lower };
   }
 
-  for (let i = period - 1; i < candles.length; i++) {
-    const window = candles.slice(i - period + 1, i + 1);
-    const mean = window.reduce((acc, c) => acc + c.close, 0) / period;
-    const variance = window.reduce((acc, c) => acc + Math.pow(c.close - mean, 2), 0) / period;
+  const effectivePeriod = Math.max(2, Math.min(period, candles.length));
+
+  for (let i = 0; i < candles.length; i++) {
+    const windowStart = Math.max(0, i - effectivePeriod + 1);
+    const window = candles.slice(windowStart, i + 1);
+    const windowLen = window.length;
+
+    const mean = window.reduce((acc, c) => acc + c.close, 0) / windowLen;
+    const variance = window.reduce((acc, c) => acc + Math.pow(c.close - mean, 2), 0) / windowLen;
     const stdDev = Math.sqrt(variance);
 
     const time = candles[i].time;

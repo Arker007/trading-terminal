@@ -35,6 +35,7 @@ import {
   Edit3,
   X,
   RefreshCw,
+  Settings,
 } from 'lucide-react';
 import {
   ChartTheme,
@@ -63,6 +64,7 @@ interface TradingViewChartProps {
   pineResult?: PineExecutionResult | null;
   onRemovePineScript?: () => void;
   onOpenPineEditor?: () => void;
+  onConfigureIndicator?: (target: 'sma' | 'ema' | 'bb') => void;
   isHistoryLoading?: boolean;
   onLoadMore?: () => void;
 }
@@ -120,6 +122,7 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
   pineResult,
   onRemovePineScript,
   onOpenPineEditor,
+  onConfigureIndicator,
   isHistoryLoading = false,
   onLoadMore,
 }) => {
@@ -139,9 +142,14 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
   const pinePriceLinesRef = useRef<IPriceLine[]>([]);
   const pineMarkersPluginRef = useRef<any>(null);
 
-  // Tracking refs for historical pagination jump prevention
+  // Timeframe and historical tracking refs
+  const lastRenderedTimeframeRef = useRef<number>(currentTimeframe);
   const lastOldestCandleTimeRef = useRef<number | null>(null);
   const lastCandlesLengthRef = useRef<number>(0);
+  const isTimeframeTransitioningRef = useRef<boolean>(false);
+  const timeframePendingScrollRef = useRef<boolean>(true);
+  const hasUserScrolledLeftRef = useRef<boolean>(false);
+  const lastLoadMoreTriggerTimeRef = useRef<number>(0);
 
   // TradingView state & tools
   const [activeLegend, setActiveLegend] = useState<LegendValues | null>(null);
@@ -164,9 +172,7 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
   const isDark = theme === 'dark';
 
   // Double-buffered RAF tick pipeline references
-  const pendingTickRef = useRef<LiveTick | null>(null);
   const rafHandleRef = useRef<number | null>(null);
-  const isRafScheduledRef = useRef<boolean>(false);
   const lastLegendUpdateTimeRef = useRef<number>(0);
   const lastCandleTimeRef = useRef<number>(0);
   const lastCandleDataKeyRef = useRef<string>('');
@@ -203,6 +209,9 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
 
   const onLoadMoreRef = useRef(onLoadMore);
   onLoadMoreRef.current = onLoadMore;
+
+  const isHistoryLoadingRef = useRef(isHistoryLoading);
+  isHistoryLoadingRef.current = isHistoryLoading;
 
   // Safe removal helper that catches any internal assertion or detachment errors
   const safeRemoveSeries = useCallback((series: ISeriesApi<any> | null) => {
@@ -272,14 +281,17 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
   const updateCandleCoords = useCallback(() => {
     const chart = chartRef.current;
     const series = mainSeriesRef.current;
-    if (!chart || !series) return;
+    const tagEl = floatingTagRef.current;
+    if (!chart || !series || !tagEl) return;
+
+    if (isTimeframeTransitioningRef.current) {
+      tagEl.style.display = 'none';
+      return;
+    }
 
     const anim = animCandleRef.current;
     let targetTime = anim.time;
     let targetClose = anim.currentClose;
-    let targetOpen = anim.open;
-    let targetHigh = anim.high;
-    let targetLow = anim.low;
 
     if (!targetTime || !targetClose) {
       const dataset = candlesRef.current;
@@ -287,11 +299,8 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
         const last = dataset[dataset.length - 1];
         targetTime = last.time;
         targetClose = last.close;
-        targetOpen = last.open;
-        targetHigh = last.high;
-        targetLow = last.low;
       } else {
-        if (floatingTagRef.current) floatingTagRef.current.style.display = 'none';
+        tagEl.style.display = 'none';
         return;
       }
     }
@@ -300,51 +309,55 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
       const x = chart.timeScale().timeToCoordinate(targetTime as any);
       const y = series.priceToCoordinate(targetClose);
 
-      const tagEl = floatingTagRef.current;
+      if (x === null || y === null || isNaN(x) || isNaN(y)) {
+        tagEl.style.display = 'none';
+      } else {
+        const containerWidth = containerRef.current?.clientWidth || 800;
+        const containerHeight = containerRef.current?.clientHeight || 500;
+        const isVisible = x >= 10 && x <= containerWidth - 45 && y >= 10 && y <= containerHeight - 20;
 
-      if (tagEl) {
-        if (x === null || y === null || isNaN(x) || isNaN(y)) {
+        if (!isVisible) {
           tagEl.style.display = 'none';
         } else {
-          const containerWidth = containerRef.current?.clientWidth || 800;
-          const containerHeight = containerRef.current?.clientHeight || 500;
-          const isVisible = x >= 10 && x <= containerWidth - 45 && y >= 10 && y <= containerHeight - 20;
-
-          if (!isVisible) {
-            tagEl.style.display = 'none';
-          } else {
-            tagEl.style.display = 'flex';
-            tagEl.style.transform = `translate3d(${x}px, ${y}px, 0) translate(10px, -50%)`;
-          }
+          tagEl.style.display = 'flex';
+          tagEl.style.transform = `translate3d(${x}px, ${y}px, 0) translate(10px, -50%)`;
         }
       }
     } catch {
-      // ignore
+      tagEl.style.display = 'none';
     }
   }, []);
 
   const hasScrolledToLiveRef = useRef<boolean>(false);
 
   // Focus chart viewport on the latest live candle side
-  const scrollToLiveCandles = useCallback(() => {
+  const scrollToLiveCandles = useCallback((datasetOverride?: FormattedCandle[]) => {
     const chart = chartRef.current;
-    const dataset = candlesRef.current;
+    const dataset = datasetOverride || candlesRef.current;
     if (!chart || !dataset || dataset.length === 0) return;
     try {
       const timeScale = chart.timeScale();
       const total = dataset.length;
-      timeScale.setVisibleLogicalRange({
-        from: Math.max(0, total - 65),
-        to: total + 12,
+      const visibleBars = Math.min(total, 65);
+      timeScale.applyOptions({
+        rightOffset: 12,
+        barSpacing: 14,
       });
-      timeScale.scrollToRealTime();
+      timeScale.setVisibleLogicalRange({
+        from: Math.max(0, total - visibleBars),
+        to: total + 8,
+      });
+      timeScale.scrollToPosition(0, false);
       hasScrolledToLiveRef.current = true;
+      hasUserScrolledLeftRef.current = false;
     } catch {
-      chartRef.current?.timeScale().scrollToRealTime();
+      try {
+        chartRef.current?.timeScale().scrollToRealTime();
+      } catch {}
     }
   }, []);
 
-  // Center chart camera on the active live candle without squeezing all history
+  // Center chart camera on the active live candle
   const handleCenterLiveCandle = useCallback(() => {
     scrollToLiveCandles();
     setTimeout(updateCandleCoords, 50);
@@ -377,7 +390,7 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
     }
   };
 
-  // Quick Time Range Selector
+  // Quick Time Range Selector with interval-adaptive minimum bar protection
   const handleSetQuickRange = (rangeType: '15m' | '1h' | '4h' | '12h' | '1D' | 'All') => {
     if (!chartRef.current || candles.length === 0) return;
     const timeScale = chartRef.current.timeScale();
@@ -409,7 +422,11 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
         break;
     }
 
-    const fromTime = toTime - secondsBack;
+    // Ensure at least 12 bars are always in view so higher timeframes never display broken sub-candle slices
+    const minSpan = currentTimeframe * 12;
+    const effectiveSpan = Math.max(secondsBack, minSpan);
+
+    const fromTime = toTime - effectiveSpan;
     timeScale.setVisibleRange({
       from: fromTime as any,
       to: (toTime + currentTimeframe * 2) as any,
@@ -505,7 +522,6 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
 
     chartRef.current = chart;
 
-    // Clear series refs when new chart is instantiated
     mainSeriesRef.current = null;
     currentSeriesTypeRef.current = null;
     volumeSeriesRef.current = null;
@@ -517,7 +533,6 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
     highPriceLineRef.current = null;
     lowPriceLineRef.current = null;
 
-    // Resize Observer for dynamic responsive sizing
     const resizeObserver = new ResizeObserver((entries) => {
       if (!entries || entries.length === 0 || !chartRef.current) return;
       const { width: newWidth, height: newHeight } = entries[0].contentRect;
@@ -532,11 +547,31 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
 
     resizeObserver.observe(container);
 
-    // Subscribe to range and scroll changes to update floating candle tags smoothly and trigger historical pagination
+    // Subscribe to range and scroll changes with safe pagination throttling
     const handleLogicalRangeChange = (newRange: any) => {
       updateCandleCoords();
-      if (!newRange) return;
-      if (newRange.from < 15) {
+      if (!newRange || isTimeframeTransitioningRef.current || timeframePendingScrollRef.current) return;
+
+      const dataset = candlesRef.current;
+      const totalBars = dataset.length;
+
+      // Track if user has genuinely scrolled backwards to view older history
+      if (newRange.to < totalBars - 6) {
+        hasUserScrolledLeftRef.current = true;
+      } else {
+        hasUserScrolledLeftRef.current = false;
+      }
+
+      // Safe trigger: only request older chunks if user scrolled left and dataset has enough initial bars
+      const now = Date.now();
+      if (
+        hasUserScrolledLeftRef.current &&
+        !isHistoryLoadingRef.current &&
+        totalBars >= 25 &&
+        newRange.from < 5 &&
+        now - lastLoadMoreTriggerTimeRef.current > 1200
+      ) {
+        lastLoadMoreTriggerTimeRef.current = now;
         onLoadMoreRef.current?.();
       }
     };
@@ -570,14 +605,12 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
       livePriceLineRef.current = null;
       try {
         chart.remove();
-      } catch {
-        // ignore
-      }
+      } catch {}
       chartRef.current = null;
     };
-  }, [isDark]); // Re-create ONLY when dark/light mode structural theme switches
+  }, [isDark]);
 
-  // Update Crosshair Mode dynamically when Magnet is toggled
+  // Update Crosshair Mode dynamically
   useEffect(() => {
     if (!chartRef.current) return;
     try {
@@ -589,7 +622,7 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
     } catch {}
   }, [magnetMode]);
 
-  // Update Price Scale Mode dynamically (Normal / Log / Percentage)
+  // Update Price Scale Mode dynamically
   useEffect(() => {
     if (!chartRef.current) return;
     try {
@@ -605,17 +638,15 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
     } catch {}
   }, [priceScaleMode, isAutoScale]);
 
-  // 2. Setup or Re-create Main Series ONLY when chartType or chart instance changes
+  // 2. Setup or Re-create Main Series ONLY when chartType changes
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
 
-    // If main series already exists and chartType has not changed, keep it
     if (mainSeriesRef.current && currentSeriesTypeRef.current === chartType) {
       return;
     }
 
-    // Safely remove previous series & clear price lines
     if (mainSeriesRef.current) {
       if (livePriceLineRef.current) {
         try {
@@ -712,7 +743,6 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
     mainSeriesRef.current = newSeries;
     currentSeriesTypeRef.current = chartType;
 
-    // Populate data if candles exist
     if (candles && candles.length > 0) {
       try {
         if (chartType === 'line' || chartType === 'area') {
@@ -733,14 +763,11 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
         }
         lastCandleTimeRef.current = candles[candles.length - 1].time;
         scrollToLiveCandles();
-        setTimeout(scrollToLiveCandles, 50);
-        setTimeout(scrollToLiveCandles, 250);
       } catch (err) {
         console.warn('Error setting main series data:', err);
       }
     }
 
-    // Subscribe to crosshair move
     const crosshairHandler = (param: any) => {
       if (!param.time || !param.seriesData || !mainSeriesRef.current) {
         updateDefaultLegend();
@@ -799,17 +826,18 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
         chart.unsubscribeCrosshairMove(crosshairHandler);
       } catch {}
     };
-  }, [chartType, isDark, safeRemoveSeries, updateDefaultLegend]);
+  }, [chartType, isDark, safeRemoveSeries, updateDefaultLegend, scrollToLiveCandles]);
 
-  // 3. Update main series data whenever candles change without destroying the series or losing user zoom
+  // 3. Update main series data with seamless timeframe transition & logical range handling
   useEffect(() => {
     const series = mainSeriesRef.current;
     const chart = chartRef.current;
     if (!series || !chart || !candles || candles.length === 0) return;
 
-    // Prevent redundant setData if the historical candle set has not changed
-    const dataKey = `${chartType}_${candles.length}_${candles[0]?.time}_${candles[candles.length - 1]?.time}`;
-    if (lastCandleDataKeyRef.current === dataKey) {
+    const isTimeframeChanged = lastRenderedTimeframeRef.current !== currentTimeframe;
+    const shouldResetToLive = isTimeframeChanged || timeframePendingScrollRef.current || !hasScrolledToLiveRef.current;
+    const dataKey = `${currentTimeframe}_${chartType}_${candles.length}_${candles[0]?.time}_${candles[candles.length - 1]?.time}`;
+    if (lastCandleDataKeyRef.current === dataKey && !shouldResetToLive) {
       return;
     }
     lastCandleDataKeyRef.current = dataKey;
@@ -818,9 +846,9 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
       const previousRange = chart.timeScale().getVisibleLogicalRange();
       const oldOldestTime = lastOldestCandleTimeRef.current;
 
-      // Update tracking refs
       lastOldestCandleTimeRef.current = candles[0]?.time || null;
       lastCandlesLengthRef.current = candles.length;
+      lastRenderedTimeframeRef.current = currentTimeframe;
 
       if (chartType === 'line' || chartType === 'area') {
         const lineData = candles.map((c) => ({
@@ -851,67 +879,100 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
         isAnimating: false,
       };
 
-      if (!hasScrolledToLiveRef.current) {
-        scrollToLiveCandles();
-        setTimeout(scrollToLiveCandles, 100);
+      // If timeframe changed or reset is requested, guarantee instant focus on the live candle
+      if (shouldResetToLive) {
+        timeframePendingScrollRef.current = false;
+        isTimeframeTransitioningRef.current = false;
+        hasUserScrolledLeftRef.current = false;
+        hasScrolledToLiveRef.current = true;
+
+        const performFocus = () => {
+          if (!chartRef.current || !candles || candles.length === 0) return;
+          try {
+            const timeScale = chartRef.current.timeScale();
+            const total = candles.length;
+            const visibleBars = Math.min(total, 65);
+            timeScale.applyOptions({
+              rightOffset: 12,
+              barSpacing: 14,
+            });
+            timeScale.setVisibleLogicalRange({
+              from: Math.max(0, total - visibleBars),
+              to: total + 8,
+            });
+            timeScale.scrollToPosition(0, false);
+          } catch {}
+          updateCandleCoords();
+        };
+
+        performFocus();
+        requestAnimationFrame(performFocus);
+        setTimeout(performFocus, 30);
+        setTimeout(performFocus, 80);
+        setTimeout(performFocus, 180);
       } else if (previousRange && oldOldestTime !== null && candles[0].time < oldOldestTime) {
-        // Prevent scroll jump when loading older historical candles
+        // Prevent scroll jump when loading older historical candles (pagination)
         const prependedCount = candles.findIndex((c) => c.time === oldOldestTime);
         if (prependedCount > 0) {
           chart.timeScale().setVisibleLogicalRange({
             from: previousRange.from + prependedCount,
             to: previousRange.to + prependedCount,
           });
-        } else {
-          chart.timeScale().setVisibleLogicalRange(previousRange);
         }
-      } else if (previousRange && previousRange.to > 15) {
+      } else if (hasUserScrolledLeftRef.current && previousRange && previousRange.to > 5 && previousRange.from < candles.length) {
         chart.timeScale().setVisibleLogicalRange(previousRange);
       } else {
-        scrollToLiveCandles();
+        scrollToLiveCandles(candles);
       }
     } catch (err) {
       console.warn('Error updating candle data:', err);
     }
-  }, [candles, chartType, scrollToLiveCandles]);
+  }, [candles, chartType, currentTimeframe, scrollToLiveCandles, updateCandleCoords]);
 
-  // Synchronize animCandleRef whenever timeframe changes
+  // Synchronize animCandleRef and clean overlays immediately whenever timeframe changes
   useEffect(() => {
+    isTimeframeTransitioningRef.current = true;
+    timeframePendingScrollRef.current = true;
     hasScrolledToLiveRef.current = false;
+    hasUserScrolledLeftRef.current = false;
     lastOldestCandleTimeRef.current = null;
+    lastCandleDataKeyRef.current = '';
+    if (floatingTagRef.current) {
+      floatingTagRef.current.style.display = 'none';
+    }
     if (rafHandleRef.current) {
       cancelAnimationFrame(rafHandleRef.current);
       rafHandleRef.current = null;
     }
-    if (candles && candles.length > 0) {
-      const last = candles[candles.length - 1];
-      animCandleRef.current = {
-        time: last.time,
-        open: last.open,
-        currentClose: last.close,
-        targetClose: last.close,
-        high: last.high,
-        low: last.low,
-        volume: last.volume || 1,
-        isAnimating: false,
-      };
-      lastCandleTimeRef.current = last.time;
-    } else {
-      animCandleRef.current = {
-        time: 0,
-        open: 0,
-        currentClose: 0,
-        targetClose: 0,
-        high: 0,
-        low: 0,
-        volume: 1,
-        isAnimating: false,
-      };
-      lastCandleTimeRef.current = 0;
-    }
-  }, [currentTimeframe]);
 
-  // 4. Setup Volume Pane using official lightweight-charts overlay pattern (priceScaleId: '')
+    if (pineMarkersPluginRef.current) {
+      try {
+        if (typeof pineMarkersPluginRef.current.setMarkers === 'function') {
+          pineMarkersPluginRef.current.setMarkers([]);
+        }
+        if (typeof pineMarkersPluginRef.current.detach === 'function') {
+          pineMarkersPluginRef.current.detach();
+        }
+      } catch {}
+      pineMarkersPluginRef.current = null;
+    }
+
+    for (const s of pineSeriesRefs.current) {
+      safeRemoveSeries(s);
+    }
+    pineSeriesRefs.current = [];
+
+    if (mainSeriesRef.current) {
+      for (const pl of pinePriceLinesRef.current) {
+        try {
+          mainSeriesRef.current.removePriceLine(pl);
+        } catch {}
+      }
+    }
+    pinePriceLinesRef.current = [];
+  }, [currentTimeframe, safeRemoveSeries]);
+
+  // 4. Setup Volume Pane
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
@@ -929,7 +990,7 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
         priceFormat: {
           type: 'volume',
         },
-        priceScaleId: '', // Overlay scale in official lightweight-charts
+        priceScaleId: '',
       });
 
       try {
@@ -960,18 +1021,24 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
 
       try {
         volumeSeriesRef.current.setData(volumeData);
+        // Force priceScale options refresh on volume scale
+        volumeSeriesRef.current.priceScale().applyOptions({
+          scaleMargins: {
+            top: 0.82,
+            bottom: 0,
+          },
+        });
       } catch (err) {
         console.warn('Error setting volume data:', err);
       }
     }
-  }, [indicators.showVolume, candles, isDark, safeRemoveSeries]);
+  }, [indicators.showVolume, candles, isDark, currentTimeframe, safeRemoveSeries]);
 
-  // 5. Setup Technical Overlays (SMA 20, EMA 50, Bollinger Bands)
+  // 5. Setup Technical Overlays (SMA, EMA, Bollinger Bands) with adaptive calculations
   useEffect(() => {
     const chart = chartRef.current;
     if (!chart) return;
 
-    // Clear previous indicator lines safely
     safeRemoveSeries(smaSeriesRef.current);
     smaSeriesRef.current = null;
     safeRemoveSeries(emaSeriesRef.current);
@@ -985,41 +1052,45 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
 
     if (!candles || candles.length === 0) return;
 
-    // SMA 20
+    // SMA
     if (indicators.showSma20) {
-      const smaData = calculateSMA(candles, 20).filter((pt) => typeof pt.value === 'number' && !isNaN(pt.value));
+      const smaPeriod = indicators.smaPeriod ?? 20;
+      const smaData = calculateSMA(candles, smaPeriod).filter((pt) => typeof pt.value === 'number' && !isNaN(pt.value));
       if (smaData.length > 0) {
         const smaSeries = chart.addSeries(LineSeries, {
           color: '#f59e0b',
           lineWidth: 2,
           priceLineVisible: false,
           lastValueVisible: true,
-          title: 'SMA 20',
+          title: `SMA ${smaPeriod}`,
         });
         smaSeries.setData(smaData as any);
         smaSeriesRef.current = smaSeries;
       }
     }
 
-    // EMA 50
+    // EMA
     if (indicators.showEma50) {
-      const emaData = calculateEMA(candles, 50).filter((pt) => typeof pt.value === 'number' && !isNaN(pt.value));
+      const emaPeriod = indicators.emaPeriod ?? 50;
+      const emaData = calculateEMA(candles, emaPeriod).filter((pt) => typeof pt.value === 'number' && !isNaN(pt.value));
       if (emaData.length > 0) {
         const emaSeries = chart.addSeries(LineSeries, {
           color: '#3b82f6',
           lineWidth: 2,
           priceLineVisible: false,
           lastValueVisible: true,
-          title: 'EMA 50',
+          title: `EMA ${emaPeriod}`,
         });
         emaSeries.setData(emaData as any);
         emaSeriesRef.current = emaSeries;
       }
     }
 
-    // Bollinger Bands (20, 2)
+    // Bollinger Bands
     if (indicators.showBollingerBands) {
-      const { upper, middle, lower } = calculateBollingerBands(candles, 20, 2);
+      const bbPeriod = indicators.bbPeriod ?? 20;
+      const bbStdDev = indicators.bbStdDev ?? 2;
+      const { upper, middle, lower } = calculateBollingerBands(candles, bbPeriod, bbStdDev);
       const upperClean = upper.filter((pt) => typeof pt.value === 'number' && !isNaN(pt.value));
       const middleClean = middle.filter((pt) => typeof pt.value === 'number' && !isNaN(pt.value));
       const lowerClean = lower.filter((pt) => typeof pt.value === 'number' && !isNaN(pt.value));
@@ -1056,7 +1127,18 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
         bbLowerRef.current = lowerSeries;
       }
     }
-  }, [indicators.showSma20, indicators.showEma50, indicators.showBollingerBands, candles, safeRemoveSeries]);
+  }, [
+    indicators.showSma20,
+    indicators.smaPeriod,
+    indicators.showEma50,
+    indicators.emaPeriod,
+    indicators.showBollingerBands,
+    indicators.bbPeriod,
+    indicators.bbStdDev,
+    candles,
+    currentTimeframe,
+    safeRemoveSeries,
+  ]);
 
   // 6. Session High / Low Price Lines
   useEffect(() => {
@@ -1100,7 +1182,7 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
         });
       }
     }
-  }, [indicators.showHighLowLevels, candles]);
+  }, [indicators.showHighLowLevels, candles, currentTimeframe]);
 
   // 6.1 Pine Script Plots & Indicators Overlay Engine
   useEffect(() => {
@@ -1108,13 +1190,11 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
     const mainSeries = mainSeriesRef.current;
     if (!chart) return;
 
-    // Clean up previous Pine series
     for (const s of pineSeriesRefs.current) {
       safeRemoveSeries(s);
     }
     pineSeriesRefs.current = [];
 
-    // Clean up previous Pine horizontal lines
     if (mainSeries) {
       for (const pl of pinePriceLinesRef.current) {
         try {
@@ -1124,35 +1204,29 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
     }
     pinePriceLinesRef.current = [];
 
-    // Clean up previous Pine markers plugin safely using detachPrimitive
-    if (pineMarkersPluginRef.current && mainSeries) {
+    if (pineMarkersPluginRef.current) {
       try {
-        mainSeries.detachPrimitive(pineMarkersPluginRef.current);
+        if (typeof pineMarkersPluginRef.current.setMarkers === 'function') {
+          pineMarkersPluginRef.current.setMarkers([]);
+        }
+        if (typeof pineMarkersPluginRef.current.detach === 'function') {
+          pineMarkersPluginRef.current.detach();
+        }
       } catch {}
       pineMarkersPluginRef.current = null;
     }
 
     if (!pineResult || !pineResult.success || !isPineVisible || !candles || candles.length === 0) {
-      if (pineResult) {
-        console.log('[PineScript Flow] 3. TradingViewChart skipped rendering (success=' + pineResult?.success + ', isPineVisible=' + isPineVisible + ', candles=' + candles?.length + ')');
-      }
+      return;
+    }
+
+    if (pineResult.timeframe && pineResult.timeframe !== currentTimeframe) {
       return;
     }
 
     try {
-      console.group('[PineScript Flow] 3. Rendering Pine Script Overlays on Lightweight Charts Canvas');
-      console.log('[PineScript Flow] Active script target:', {
-        scriptName: pineResult.scriptName,
-        scriptType: pineResult.scriptType,
-        isOverlay: pineResult.isOverlay,
-        plotsCount: pineResult.plots?.length || 0,
-        hlinesCount: pineResult.hlines?.length || 0,
-        markersCount: pineResult.markers?.length || 0,
-      });
-
       const isOverlay = pineResult.isOverlay !== false;
 
-      // Configure Left vs Right Price Scales for non-overlay (e.g. RSI, MACD) vs overlay indicators
       if (!isOverlay) {
         try {
           chart.priceScale('left').applyOptions({
@@ -1174,12 +1248,11 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
         } catch {}
       }
 
-      // 1. Render Plotted Series
+      // Render Plotted Series
       if (pineResult.plots && pineResult.plots.length > 0) {
         for (const plot of pineResult.plots) {
           if (!plot.data || plot.data.length === 0) continue;
 
-          // Filter, sort and deduplicate timestamps to ensure lightweight-charts invariant holds
           const sortedRaw = [...plot.data]
             .filter((pt) => typeof pt.time === 'number' && typeof pt.value === 'number' && !isNaN(pt.value))
             .sort((a, b) => a.time - b.time);
@@ -1224,7 +1297,7 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
         }
       }
 
-      // 2. Render Horizontal Reference Lines (hlines)
+      // Render Horizontal Reference Lines
       if (mainSeries && pineResult.hlines && pineResult.hlines.length > 0) {
         for (const hl of pineResult.hlines) {
           if (typeof hl.price === 'number' && !isNaN(hl.price)) {
@@ -1241,10 +1314,18 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
         }
       }
 
-      // 3. Render Pine Markers (Strategy Buy/Sell, Triangles, Signal Labels)
+      // Render Pine Markers
       if (mainSeries && pineResult.markers && pineResult.markers.length > 0) {
+        const candleTimeSet = new Set(candles.map((c) => c.time));
+        const candleMinTime = candles[0].time;
+        const candleMaxTime = candles[candles.length - 1].time;
+
         const cleanMarkers = pineResult.markers
-          .filter((m) => typeof m.time === 'number' && !isNaN(m.time))
+          .filter((m) => {
+            if (typeof m.time !== 'number' || isNaN(m.time)) return false;
+            if (m.time < candleMinTime || m.time > candleMaxTime) return false;
+            return candleTimeSet.has(m.time);
+          })
           .sort((a, b) => a.time - b.time)
           .map((m) => {
             const text = (m.text || '').replace(/[⇧⇩↑↓▲▼⇪]/g, '').trim();
@@ -1260,37 +1341,35 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
 
         if (cleanMarkers.length > 0) {
           pineMarkersPluginRef.current = createSeriesMarkers(mainSeries, cleanMarkers);
-          console.log('[PineScript Flow] Created series markers plugin with ' + cleanMarkers.length + ' markers');
         }
       }
-
-      console.log('[PineScript Flow] Successfully rendered on chart canvas:', {
-        renderedSeries: pineSeriesRefs.current.length,
-        renderedPriceLines: pinePriceLinesRef.current.length,
-        markersAttached: !!pineMarkersPluginRef.current,
-      });
-      console.groupEnd();
     } catch (err) {
-      console.warn('[PineScript Flow] Error rendering Pine Script overlays:', err);
-      console.groupEnd();
+      console.warn('Error rendering Pine Script overlays:', err);
     }
-  }, [pineResult, isPineVisible, candles, safeRemoveSeries]);
 
-  // 7. Optimal Double-Buffered RAF Real-Time Tick Dispatcher with Full Value Validation
+    return () => {
+      if (pineMarkersPluginRef.current) {
+        try {
+          if (typeof pineMarkersPluginRef.current.setMarkers === 'function') {
+            pineMarkersPluginRef.current.setMarkers([]);
+          }
+          if (typeof pineMarkersPluginRef.current.detach === 'function') {
+            pineMarkersPluginRef.current.detach();
+          }
+        } catch {}
+        pineMarkersPluginRef.current = null;
+      }
+    };
+  }, [pineResult, isPineVisible, candles, currentTimeframe, safeRemoveSeries]);
+
+  // 7. Optimal Double-Buffered RAF Real-Time Tick Dispatcher
   const commitTickToCanvas = useCallback(
     (tick: LiveTick) => {
       if (!mainSeriesRef.current || !chartRef.current) return;
       if (!tick || typeof tick.time !== 'number' || isNaN(tick.time)) return;
       if (typeof tick.close !== 'number' || isNaN(tick.close)) return;
 
-      // Strictly guard against backwards timestamps (prevents "Cannot update oldest data")
       if (lastCandleTimeRef.current && tick.time < lastCandleTimeRef.current) {
-        return;
-      }
-
-      // Outlier protection against canvas corruption
-      const baseline = animCandleRef.current.targetClose > 0 ? animCandleRef.current.targetClose : (candlesRef.current[candlesRef.current.length - 1]?.close || 0);
-      if (baseline > 0 && Math.abs(tick.close - baseline) / baseline > 0.02) {
         return;
       }
 
@@ -1304,7 +1383,6 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
       const volumeVal = typeof tick.volume === 'number' && !isNaN(tick.volume) ? tick.volume : 1;
 
       try {
-        // Update main series directly on GPU canvas
         if (chartType === 'line' || chartType === 'area') {
           (mainSeriesRef.current as ISeriesApi<'Line' | 'Area'>).update({
             time: tickTime,
@@ -1323,10 +1401,8 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
         if (err?.message?.includes?.('Cannot update oldest data')) {
           return;
         }
-        console.warn('Canvas main series update failed:', err);
       }
 
-      // Update volume series if active
       if (volumeSeriesRef.current) {
         try {
           volumeSeriesRef.current.update({
@@ -1344,7 +1420,6 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
         } catch {}
       }
 
-      // Update session high/low price lines if new extreme reached
       if (indicators.showHighLowLevels) {
         try {
           if (highPriceLineRef.current && highVal > highPriceLineRef.current.options().price) {
@@ -1356,10 +1431,8 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
         } catch {}
       }
 
-      // Update screen coordinates for on-candle price pill and foreground HUD
       updateCandleCoords();
 
-      // Update Legend DOM values throttled to ~30fps to avoid DOM reflow overhead
       const now = Date.now();
       if (now - lastLegendUpdateTimeRef.current >= 33) {
         lastLegendUpdateTimeRef.current = now;
@@ -1384,7 +1457,7 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
         onLegendChangeRef.current?.(updatedLegend);
       }
     },
-    [chartType, indicators.showHighLowLevels, isDark]
+    [chartType, indicators.showHighLowLevels, isDark, updateCandleCoords]
   );
 
   // 60 FPS Fluid Continuous Easing Real-Time Tick Dispatcher
@@ -1395,18 +1468,11 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
 
       const anim = animCandleRef.current;
 
-      // Price Sanity Shield: reject rogue ticks that jump by > 2% from current candle baseline
-      const baselinePrice = anim.targetClose > 0 ? anim.targetClose : (candlesRef.current[candlesRef.current.length - 1]?.close || 0);
-      if (baselinePrice > 0 && Math.abs(tick.close - baselinePrice) / baselinePrice > 0.02) {
-        console.warn('[TradingViewChart] Suppressed anomalous outlier tick:', tick.close, 'vs baseline:', baselinePrice);
-        return;
-      }
-
       const tickKey = `${tick.time}_${tick.close}_${tick.tickIndex || 0}_${tick.serverTimestamp || 0}`;
       lastProcessedTickRef.current = tickKey;
 
       if (anim.time > 0 && tick.time < anim.time) {
-        return; // Ignore stale or older ticks from previous intervals
+        return;
       }
 
       const isNew = tick.isNewCandle || tick.time > anim.time || anim.time === 0;
@@ -1454,7 +1520,6 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
 
           const diff = anim.targetClose - anim.currentClose;
 
-          // Smooth exponential easing factor: 0.22 per frame gives fluid ~180ms transition
           if (Math.abs(diff) > 1e-12) {
             anim.currentClose += diff * 0.22;
           } else {
@@ -1492,7 +1557,7 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
     [commitTickToCanvas]
   );
 
-  // Register fast callback for sub-millisecond invocation
+  // Register fast callback
   useEffect(() => {
     if (onFastTickRef) {
       onFastTickRef.current = scheduleTick;
@@ -1757,28 +1822,58 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
         </div>
 
         {/* Active Indicator Legend Badges */}
-        <div className="absolute top-10 left-3 pointer-events-none z-10 flex flex-col gap-1 text-[11px] font-mono">
+        <div className="absolute top-10 left-3 pointer-events-auto z-10 flex flex-col gap-1 text-[11px] font-mono select-none">
           {indicators.showSma20 && (
-            <div className="flex items-center gap-1.5 text-amber-500 font-medium">
-              <span className="w-2 h-0.5 bg-amber-500 inline-block" />
-              <span>SMA 20</span>
+            <div className="group flex items-center gap-1.5 text-amber-500 font-medium bg-white/70 dark:bg-slate-900/70 backdrop-blur-xs px-1.5 py-0.5 rounded border border-slate-200/50 dark:border-slate-800/50 shadow-xs">
+              <span className="w-2 h-0.5 bg-amber-500 inline-block shrink-0" />
+              <span>SMA {indicators.smaPeriod ?? 20}</span>
+              {onConfigureIndicator && (
+                <button
+                  type="button"
+                  onClick={() => onConfigureIndicator('sma')}
+                  title="Configure SMA parameters"
+                  className="opacity-0 group-hover:opacity-100 hover:text-amber-400 p-0.5 rounded transition-opacity cursor-pointer"
+                >
+                  <Settings className="w-3 h-3" />
+                </button>
+              )}
             </div>
           )}
           {indicators.showEma50 && (
-            <div className="flex items-center gap-1.5 text-blue-500 font-medium">
-              <span className="w-2 h-0.5 bg-blue-500 inline-block" />
-              <span>EMA 50</span>
+            <div className="group flex items-center gap-1.5 text-blue-500 font-medium bg-white/70 dark:bg-slate-900/70 backdrop-blur-xs px-1.5 py-0.5 rounded border border-slate-200/50 dark:border-slate-800/50 shadow-xs">
+              <span className="w-2 h-0.5 bg-blue-500 inline-block shrink-0" />
+              <span>EMA {indicators.emaPeriod ?? 50}</span>
+              {onConfigureIndicator && (
+                <button
+                  type="button"
+                  onClick={() => onConfigureIndicator('ema')}
+                  title="Configure EMA parameters"
+                  className="opacity-0 group-hover:opacity-100 hover:text-blue-400 p-0.5 rounded transition-opacity cursor-pointer"
+                >
+                  <Settings className="w-3 h-3" />
+                </button>
+              )}
             </div>
           )}
           {indicators.showBollingerBands && (
-            <div className="flex items-center gap-1.5 text-purple-400 font-medium">
-              <span className="w-2 h-0.5 bg-purple-400 inline-block" />
-              <span>BB (20, 2)</span>
+            <div className="group flex items-center gap-1.5 text-purple-400 font-medium bg-white/70 dark:bg-slate-900/70 backdrop-blur-xs px-1.5 py-0.5 rounded border border-slate-200/50 dark:border-slate-800/50 shadow-xs">
+              <span className="w-2 h-0.5 bg-purple-400 inline-block shrink-0" />
+              <span>BB ({indicators.bbPeriod ?? 20}, {indicators.bbStdDev ?? 2})</span>
+              {onConfigureIndicator && (
+                <button
+                  type="button"
+                  onClick={() => onConfigureIndicator('bb')}
+                  title="Configure Bollinger Bands parameters"
+                  className="opacity-0 group-hover:opacity-100 hover:text-purple-300 p-0.5 rounded transition-opacity cursor-pointer"
+                >
+                  <Settings className="w-3 h-3" />
+                </button>
+              )}
             </div>
           )}
           {indicators.showVolume && (
-            <div className="flex items-center gap-1.5 text-slate-400 font-medium">
-              <span className="w-2 h-2 rounded-xs bg-slate-400/40 inline-block" />
+            <div className="flex items-center gap-1.5 text-slate-400 font-medium bg-white/70 dark:bg-slate-900/70 backdrop-blur-xs px-1.5 py-0.5 rounded border border-slate-200/50 dark:border-slate-800/50 shadow-xs">
+              <span className="w-2 h-2 rounded-xs bg-slate-400/40 inline-block shrink-0" />
               <span>Vol (Ticks)</span>
             </div>
           )}
@@ -1791,7 +1886,6 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
                 {pineResult.scriptName || 'Custom Pine Script'}
               </span>
 
-              {/* Plotted values */}
               {pineResult.plots && pineResult.plots.length > 0 && (
                 <div className="flex items-center gap-2 border-l border-slate-700 pl-2">
                   {pineResult.plots.slice(0, 4).map((plot) => {
@@ -1809,7 +1903,6 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
                 </div>
               )}
 
-              {/* Controls */}
               <div className="flex items-center gap-1 border-l border-slate-700 pl-1.5">
                 <button
                   type="button"
@@ -1854,7 +1947,6 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
             className="absolute pointer-events-none z-20 flex items-center transition-all duration-75 ease-out"
             style={{ display: 'none' }}
           >
-            {/* Live pulsing beacon at the exact candle tip */}
             <div className="absolute -left-2.5 flex items-center justify-center">
               <span
                 className={`absolute w-3.5 h-3.5 rounded-full animate-ping opacity-75 ${
@@ -1868,7 +1960,6 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
               />
             </div>
 
-            {/* Glowing On-Candle Floating Pill */}
             <div
               className={`flex items-center gap-1 px-2 py-0.5 rounded-md font-mono text-[11px] font-bold shadow-lg border backdrop-blur-md transition-colors whitespace-nowrap ${
                 (activeLegend?.isUp ?? true)
@@ -1924,7 +2015,6 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
               </div>
             </div>
 
-            {/* Actual Live Price Large Display */}
             <div className="flex items-baseline justify-between gap-1 pt-0.5">
               <div
                 className={`text-base font-extrabold tracking-tight font-mono tabular-nums ${
@@ -1937,7 +2027,6 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
               </div>
             </div>
 
-            {/* Live Delta & Candle Countdown */}
             <div className="flex items-center justify-between text-[10px] text-slate-500 dark:text-slate-400 font-mono">
               <span
                 className={`font-semibold font-mono tabular-nums ${
@@ -1958,7 +2047,6 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
               )}
             </div>
 
-            {/* Active Candle OHLC Snapshot */}
             <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-[9px] pt-1 border-t border-slate-100 dark:border-[#2a2e39]/60 text-slate-400">
               <div className="truncate">O: <span className="text-slate-700 dark:text-slate-300 font-medium font-mono tabular-nums">{formatPrice(activeLegend?.open ?? 0)}</span></div>
               <div className="truncate">H: <span className="text-slate-700 dark:text-slate-300 font-medium font-mono tabular-nums">{formatPrice(activeLegend?.high ?? 0)}</span></div>

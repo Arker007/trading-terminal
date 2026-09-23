@@ -96,25 +96,50 @@ function getBinomoDatetimeForInterval(interval: number, now = new Date()): strin
   } else if (interval <= 60) {
     // 60s (1m): daily midnight chunk
     return `${y}-${m}-${d}T00:00:00`;
-  } else if (interval <= 300) {
-    // 300s (5m): multi-day Sunday chunk
-    const daysBack = now.getUTCDay();
-    const sunday = new Date(now.getTime() - daysBack * 86400000);
-    const sy = sunday.getUTCFullYear();
-    const sm = pad(sunday.getUTCMonth() + 1);
-    const sd = pad(sunday.getUTCDate());
-    return `${sy}-${sm}-${sd}T00:00:00`;
   } else {
-    // 15m, 1h: monthly chunk
-    return `${y}-${m}-01T00:00:00`;
+    // 300s (5m), 900s (15m), 3600s (1h), etc.: daily midnight chunk
+    return `${y}-${m}-${d}T00:00:00`;
   }
 }
+
+  // Aggregate smaller interval candles into target interval candles
+  function aggregateCandles(rawCandles: BinomoCandle[], targetInterval: number): BinomoCandle[] {
+    if (rawCandles.length === 0) return [];
+    const candleMap = new Map<number, BinomoCandle>();
+
+    for (const c of rawCandles) {
+      const timeInSec = Math.floor(new Date(c.created_at).getTime() / 1000);
+      const bucket = Math.floor(timeInSec / targetInterval) * targetInterval;
+
+      const existing = candleMap.get(bucket);
+      if (!existing) {
+        candleMap.set(bucket, {
+          open: Number(c.open),
+          high: Number(c.high),
+          low: Number(c.low),
+          close: Number(c.close),
+          created_at: new Date(bucket * 1000).toISOString(),
+        });
+      } else {
+        existing.high = Math.max(existing.high, Number(c.high));
+        existing.low = Math.min(existing.low, Number(c.low));
+        existing.close = Number(c.close);
+      }
+    }
+
+    return Array.from(candleMap.values()).sort(
+      (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+    );
+  }
 
   // Poller for a specific interval
   async function pollBinomoInterval(interval: number) {
     try {
-      const defaultDate = getBinomoDatetimeForInterval(interval);
-      const url = `https://api.binomo.com/candles/v1/Z-CRY%2FIDX/${defaultDate}/${interval}?locale=en`;
+      // Upstream Binomo supports native 5s, 15s, 30s, and 60s intervals.
+      // For intervals > 60s (e.g. 300s = 5m, 900s = 15m, 3600s = 1h), fetch the latest 60s candle and synthesize the target interval candle.
+      const upstreamInterval = interval > 60 ? 60 : interval;
+      const defaultDate = getBinomoDatetimeForInterval(upstreamInterval);
+      const url = `https://api.binomo.com/candles/v1/Z-CRY%2FIDX/${defaultDate}/${upstreamInterval}?locale=en`;
       const resp = await fetch(url, {
         headers: {
           "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)",
@@ -167,9 +192,9 @@ function getBinomoDatetimeForInterval(interval: number, now = new Date()): strin
     }
   }
 
-  // Poll all currently active intervals (including 5s and 60s by default)
+  // Poll all currently active and standard intervals continuously
   async function pollAllActiveIntervals() {
-    const intervalsToPoll = new Set<number>([5, 60]);
+    const intervalsToPoll = new Set<number>([5, 15, 30, 60, 300, 900, 3600]);
     for (const iv of sseClients.values()) {
       intervalsToPoll.add(iv);
     }
@@ -189,6 +214,74 @@ function getBinomoDatetimeForInterval(interval: number, now = new Date()): strin
       const defaultDate = getBinomoDatetimeForInterval(intervalNum);
       const date = (req.query.date as string) || defaultDate;
       const locale = (req.query.locale as string) || "en";
+
+      // If interval > 60 (e.g. 300s = 5m, 900s = 15m, 3600s = 1h), upstream Binomo does not serve it natively.
+      // We fetch 60s candles and aggregate them into the target timeframe!
+      if (intervalNum > 60 && !req.query.url) {
+        const encodedAsset = encodeURIComponent(asset);
+        const reqDate = new Date(date.endsWith("Z") ? date : date + "Z");
+        const daysToFetch = intervalNum >= 3600 ? 5 : intervalNum >= 900 ? 3 : 2;
+        const all60sCandles: BinomoCandle[] = [];
+
+        // Fetch multiple consecutive days of 60s candles leading up to the requested date
+        const pad = (n: number) => String(n).padStart(2, "0");
+        for (let i = daysToFetch - 1; i >= 0; i--) {
+          const d = new Date(reqDate.getTime() - i * 86400000);
+          const dateStr = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}T00:00:00`;
+          const dayUrl = `https://api.binomo.com/candles/v1/${encodedAsset}/${dateStr}/60?locale=${locale}`;
+          try {
+            const dayResp = await fetch(dayUrl, {
+              headers: {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko)",
+                "Accept": "application/json, text/plain, */*",
+              },
+              signal: AbortSignal.timeout(6000),
+            });
+            if (dayResp.ok) {
+              const dayJson = await dayResp.json();
+              if (Array.isArray(dayJson?.data)) {
+                all60sCandles.push(...dayJson.data);
+              }
+            }
+          } catch {
+            // continue with available days
+          }
+        }
+
+        // De-duplicate by created_at and sort chronologically
+        const seen = new Set<string>();
+        const unique60s: BinomoCandle[] = [];
+        for (const c of all60sCandles) {
+          if (!seen.has(c.created_at)) {
+            seen.add(c.created_at);
+            unique60s.push(c);
+          }
+        }
+        unique60s.sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+
+        // Aggregate 60s candles into target interval (e.g. 900s for 15m)
+        const aggregated = aggregateCandles(unique60s, intervalNum);
+
+        const resultData = {
+          data: aggregated,
+          errors: [],
+          success: true,
+          _meta: {
+            targetUrl: `https://api.binomo.com/candles/v1/${encodedAsset}/${date}/${intervalNum}?locale=${locale}`,
+            fetchedAt: new Date().toISOString(),
+            candleCount: aggregated.length,
+            isSynthesized: true,
+            sourceInterval: 60,
+          },
+        };
+
+        if (aggregated.length > 0) {
+          historyCache.set(intervalNum, resultData);
+        }
+
+        res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+        return res.json(resultData);
+      }
 
       let targetUrl = req.query.url as string;
       if (!targetUrl) {

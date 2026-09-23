@@ -33,8 +33,15 @@ export type ChartTheme = 'dark' | 'light';
 
 export interface IndicatorSettings {
   showSma20: boolean;
+  smaPeriod?: number;
+
   showEma50: boolean;
+  emaPeriod?: number;
+
   showBollingerBands: boolean;
+  bbPeriod?: number;
+  bbStdDev?: number;
+
   showVolume: boolean;
   showHighLowLevels: boolean;
 }

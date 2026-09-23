@@ -29,6 +29,7 @@ interface PineEditorProps {
   isOpen: boolean;
   onClose: () => void;
   candles: FormattedCandle[];
+  currentTimeframe?: number;
   activeExecutionResult: PineExecutionResult | null;
   onApplyScriptResult: (result: PineExecutionResult | null, code: string) => void;
   theme: 'dark' | 'light';
@@ -40,6 +41,7 @@ export const PineEditor: React.FC<PineEditorProps> = ({
   isOpen,
   onClose,
   candles,
+  currentTimeframe = 60,
   activeExecutionResult,
   onApplyScriptResult,
   theme,
@@ -85,7 +87,7 @@ export const PineEditor: React.FC<PineEditorProps> = ({
     console.log('[PineScript Flow] Input code length:', code.length, 'chars | Market candles available:', candles.length);
     
     const startTime = performance.now();
-    const res = executePineScript(code, candles);
+    const res = executePineScript(code, candles, currentTimeframe);
     const elapsed = (performance.now() - startTime).toFixed(2);
     
     console.log('[PineScript Flow] Execution completed in ' + elapsed + 'ms', {
@@ -247,60 +249,63 @@ export const PineEditor: React.FC<PineEditorProps> = ({
 
       {/* Pine Editor Header Toolbar */}
       <div
-        className={`flex items-center justify-between px-3 py-1.5 border-b text-xs select-none ${
+        className={`flex items-center justify-between px-2.5 py-1 border-b text-xs select-none overflow-x-auto no-scrollbar gap-2 shrink-0 ${
           isDark ? 'border-[#2a2e39] bg-[#1e222d]' : 'border-slate-200 bg-slate-50'
         }`}
       >
         {/* Left: Tab selectors */}
-        <div className="flex items-center gap-1">
-          <div className="flex items-center gap-1.5 pr-2 mr-1 border-r border-slate-700/30 dark:border-slate-700">
-            <Code className="w-4 h-4 text-blue-500" />
-            <span className="font-bold tracking-tight text-[13px]">Pine Editor</span>
-            <span className="text-[10px] px-1.5 py-0.5 rounded font-mono font-semibold bg-blue-500/10 text-blue-500">
+        <div className="flex items-center gap-1 shrink-0">
+          <div className="flex items-center gap-1.5 pr-2 mr-0.5 border-r border-slate-700/30 dark:border-slate-700 shrink-0 whitespace-nowrap">
+            <Code className="w-4 h-4 text-blue-500 shrink-0" />
+            <span className="font-bold tracking-tight text-[12.5px] whitespace-nowrap">Pine</span>
+            <span className="text-[10px] px-1.5 py-0.2 rounded font-mono font-semibold bg-blue-500/10 text-blue-500 shrink-0">
               v5
             </span>
           </div>
 
-          <div className="flex items-center gap-0.5 bg-slate-200/50 dark:bg-[#131722] p-0.5 rounded-md">
+          <div className="flex items-center gap-0.5 bg-slate-200/50 dark:bg-[#131722] p-0.5 rounded-md shrink-0">
             <button
               onClick={() => setActiveTab('editor')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded text-xs font-medium transition-all ${
+              title="Pine Script Code Editor"
+              className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-all whitespace-nowrap shrink-0 cursor-pointer ${
                 activeTab === 'editor'
-                  ? 'bg-blue-600 text-white shadow-sm font-semibold'
+                  ? 'bg-blue-600 text-white shadow-xs font-semibold'
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              <FileCode className="w-3.5 h-3.5" />
-              Editor
+              <FileCode className="w-3.5 h-3.5 shrink-0" />
+              <span>Editor</span>
             </button>
 
             <button
               onClick={() => setActiveTab('strategy-tester')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded text-xs font-medium transition-all ${
+              title="Strategy Tester & Performance Metrics"
+              className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-all whitespace-nowrap shrink-0 cursor-pointer ${
                 activeTab === 'strategy-tester'
-                  ? 'bg-blue-600 text-white shadow-sm font-semibold'
+                  ? 'bg-blue-600 text-white shadow-xs font-semibold'
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              <BarChart2 className="w-3.5 h-3.5" />
-              Strategy Tester
+              <BarChart2 className="w-3.5 h-3.5 shrink-0" />
+              <span>Strategy</span>
               {currentResult?.strategyStats && (
-                <span className="ml-1 w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                <span className="ml-0.5 w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
               )}
             </button>
 
             <button
               onClick={() => setActiveTab('plots')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded text-xs font-medium transition-all ${
+              title="Plots, Signals & Indicators"
+              className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-all whitespace-nowrap shrink-0 cursor-pointer ${
                 activeTab === 'plots'
-                  ? 'bg-blue-600 text-white shadow-sm font-semibold'
+                  ? 'bg-blue-600 text-white shadow-xs font-semibold'
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              <Layers className="w-3.5 h-3.5" />
-              Plots & Signals
+              <Layers className="w-3.5 h-3.5 shrink-0" />
+              <span>Plots</span>
               {currentResult?.plots && currentResult.plots.length > 0 && (
-                <span className="ml-1 px-1 py-0.2 rounded text-[10px] bg-slate-300 dark:bg-slate-700">
+                <span className="ml-0.5 px-1 py-0.2 rounded text-[10px] bg-slate-300 dark:bg-slate-700 leading-none">
                   {currentResult.plots.length}
                 </span>
               )}
@@ -308,28 +313,30 @@ export const PineEditor: React.FC<PineEditorProps> = ({
 
             <button
               onClick={() => setActiveTab('templates')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded text-xs font-medium transition-all ${
+              title="Script Library & Presets"
+              className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-all whitespace-nowrap shrink-0 cursor-pointer ${
                 activeTab === 'templates'
-                  ? 'bg-blue-600 text-white shadow-sm font-semibold'
+                  ? 'bg-blue-600 text-white shadow-xs font-semibold'
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              <BookOpen className="w-3.5 h-3.5" />
-              Script Library
+              <BookOpen className="w-3.5 h-3.5 shrink-0" />
+              <span>Library</span>
             </button>
 
             <button
               onClick={() => setActiveTab('console')}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded text-xs font-medium transition-all ${
+              title="Compiler Output & Diagnostics"
+              className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-all whitespace-nowrap shrink-0 cursor-pointer ${
                 activeTab === 'console'
-                  ? 'bg-blue-600 text-white shadow-sm font-semibold'
+                  ? 'bg-blue-600 text-white shadow-xs font-semibold'
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              <Terminal className="w-3.5 h-3.5" />
-              Console
+              <Terminal className="w-3.5 h-3.5 shrink-0" />
+              <span>Console</span>
               {currentResult?.errors && currentResult.errors.length > 0 && (
-                <span className="ml-1 px-1.5 py-0.2 rounded text-[10px] bg-rose-500 text-white font-bold">
+                <span className="ml-0.5 px-1.5 py-0.2 rounded text-[10px] bg-rose-500 text-white font-bold leading-none">
                   {currentResult.errors.length}
                 </span>
               )}
@@ -338,24 +345,27 @@ export const PineEditor: React.FC<PineEditorProps> = ({
         </div>
 
         {/* Right: Actions */}
-        <div className="flex items-center gap-1.5">
+        <div className="flex items-center gap-1.5 shrink-0 whitespace-nowrap">
           {/* Active status pill */}
           {isCompiled && currentResult?.success && (
-            <div className="hidden sm:flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-500 text-[11px] font-medium border border-emerald-500/20">
-              <CheckCircle2 className="w-3.5 h-3.5" />
-              <span>Applied to Chart</span>
+            <div
+              title="Script is currently compiled and active on chart"
+              className="flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-500 text-[11px] font-medium border border-emerald-500/20 shrink-0 whitespace-nowrap"
+            >
+              <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-500" />
+              <span>Active</span>
             </div>
           )}
 
           {/* Quick template selector */}
-          <div className="relative">
+          <div className="relative shrink-0" title="Select Pine Script Template">
             <select
               value={selectedTemplateId}
               onChange={(e) => {
                 const found = PINE_TEMPLATES.find((t) => t.id === e.target.value);
                 if (found) handleSelectTemplate(found);
               }}
-              className={`text-xs rounded px-2 py-1 border appearance-none pr-6 cursor-pointer font-medium ${
+              className={`text-xs rounded px-2 py-1 border appearance-none pr-6 cursor-pointer font-medium max-w-[130px] sm:max-w-[160px] truncate ${
                 isDark
                   ? 'bg-[#131722] border-[#2a2e39] text-[#d1d4dc] hover:border-slate-600'
                   : 'bg-white border-slate-300 text-slate-700 hover:border-slate-400'
@@ -363,7 +373,7 @@ export const PineEditor: React.FC<PineEditorProps> = ({
             >
               {PINE_TEMPLATES.map((tpl) => (
                 <option key={tpl.id} value={tpl.id}>
-                  {tpl.title} ({tpl.type})
+                  {tpl.shortTitle || tpl.title}
                 </option>
               ))}
             </select>
@@ -373,45 +383,45 @@ export const PineEditor: React.FC<PineEditorProps> = ({
           <button
             onClick={handleResetCode}
             title="Reset to Template Default"
-            className="p-1 rounded hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-500 transition-colors"
+            className="p-1 rounded hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-500 transition-colors shrink-0 cursor-pointer"
           >
             <RotateCcw className="w-3.5 h-3.5" />
           </button>
 
           <button
             onClick={handleSaveScript}
-            title="Save script (Ctrl+S)"
-            className="flex items-center gap-1 px-2 py-1 rounded border border-slate-300 dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 transition-colors font-medium"
+            title="Save script to local storage (Ctrl+S)"
+            className="flex items-center gap-1 px-2 py-1 rounded border border-slate-300 dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 transition-colors font-medium shrink-0 whitespace-nowrap cursor-pointer"
           >
-            <Save className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Save</span>
+            <Save className="w-3.5 h-3.5 shrink-0" />
+            <span>Save</span>
           </button>
 
           {/* Add to chart primary button */}
           <button
             onClick={handleCompileAndApply}
-            title="Compile and Add to Chart (Ctrl+Enter)"
-            className="flex items-center gap-1.5 px-3 py-1 rounded bg-blue-600 hover:bg-blue-700 text-white font-semibold transition-all shadow-sm active:scale-95"
+            title="Compile & Add to Chart (Ctrl+Enter)"
+            className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-blue-600 hover:bg-blue-700 text-white font-medium transition-all shadow-xs active:scale-95 shrink-0 whitespace-nowrap cursor-pointer"
           >
-            <Play className="w-3.5 h-3.5 fill-current" />
-            <span>Add to chart</span>
+            <Play className="w-3 h-3 fill-current shrink-0" />
+            <span>Add to Chart</span>
           </button>
 
           {isCompiled && (
             <button
               onClick={handleRemoveFromChart}
               title="Remove from chart"
-              className="px-2 py-1 rounded text-rose-500 hover:bg-rose-500/10 border border-rose-500/20 font-medium transition-colors"
+              className="px-2 py-1 rounded text-rose-500 hover:bg-rose-500/10 border border-rose-500/20 font-medium transition-colors shrink-0 whitespace-nowrap cursor-pointer"
             >
               Remove
             </button>
           )}
 
-          <div className="w-[1px] h-4 bg-slate-300 dark:bg-slate-700 mx-0.5" />
+          <div className="w-[1px] h-4 bg-slate-300 dark:bg-slate-700 mx-0.5 shrink-0" />
 
           <button
             onClick={() => setIsMaximized(!isMaximized)}
-            className="p-1 rounded hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-500 transition-colors"
+            className="p-1 rounded hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-500 transition-colors shrink-0 cursor-pointer"
             title={isMaximized ? 'Restore height' : 'Maximize Pine Editor'}
           >
             {isMaximized ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
@@ -419,7 +429,7 @@ export const PineEditor: React.FC<PineEditorProps> = ({
 
           <button
             onClick={onClose}
-            className="p-1 rounded hover:bg-rose-500 hover:text-white text-slate-500 transition-colors"
+            className="p-1 rounded hover:bg-rose-500 hover:text-white text-slate-500 transition-colors shrink-0 cursor-pointer"
             title="Close Pine Editor"
           >
             <X className="w-4 h-4" />

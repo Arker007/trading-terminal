@@ -68,6 +68,7 @@ export interface PineExecutionResult {
   scriptName: string;
   scriptType: 'indicator' | 'strategy';
   isOverlay: boolean;
+  timeframe?: number;
   plots: PinePlot[];
   hlines: PineHLine[];
   markers: PineMarker[];
@@ -81,6 +82,7 @@ export interface PineExecutionResult {
 export interface PineTemplate {
   id: string;
   title: string;
+  shortTitle?: string;
   description: string;
   type: 'indicator' | 'strategy';
   category: 'Trend' | 'Momentum' | 'Volatility' | 'Strategies' | 'Custom';

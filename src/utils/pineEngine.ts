@@ -930,6 +930,25 @@ export function evaluateBooleanExpression(
   if (trimmed === 'true') return new Array(len).fill(true);
   if (trimmed === 'false') return new Array(len).fill(false);
 
+  // 1a1. String equality comparison (e.g. timeframe.period == "5S" or timeframe.period == "1")
+  if (trimmed.includes('==') || trimmed.includes('!=')) {
+    const isEq = trimmed.includes('==');
+    const op = isEq ? '==' : '!=';
+    const parts = splitTopLevel(trimmed, op);
+    if (parts.length === 2) {
+      const left = parts[0].trim();
+      const right = parts[1].trim();
+      const leftIsStr = left.startsWith('"') || left.startsWith("'") || typeof env[left] === 'string';
+      const rightIsStr = right.startsWith('"') || right.startsWith("'") || typeof env[right] === 'string';
+      if (leftIsStr || rightIsStr) {
+        const leftVal = env[left] !== undefined ? String(env[left]) : left.replace(/['"]/g, '');
+        const rightVal = env[right] !== undefined ? String(env[right]) : right.replace(/['"]/g, '');
+        const match = isEq ? leftVal === rightVal : leftVal !== rightVal;
+        return new Array(len).fill(match);
+      }
+    }
+  }
+
   // 1a. ta.na(x) or na(x)
   const naMatch = trimmed.match(/^(?:ta\.)?na\s*\((.*)\)$/i);
   if (naMatch) {
@@ -1084,7 +1103,8 @@ export function evaluateBooleanExpression(
  */
 export function executePineScript(
   scriptCode: string,
-  candles: FormattedCandle[]
+  candles: FormattedCandle[],
+  timeframeSeconds: number = 60
 ): PineExecutionResult {
   const startTime = performance.now();
   const errors: PineCompileError[] = [];
@@ -1099,6 +1119,7 @@ export function executePineScript(
     scriptName: 'Custom Pine Script',
     scriptType: 'indicator',
     isOverlay: true,
+    timeframe: timeframeSeconds,
     plots: [],
     hlines: [],
     markers: [],
@@ -1125,6 +1146,26 @@ export function executePineScript(
     const lows = candles.map((c) => c.low);
     const env: Record<string, any> = {};
 
+    // Determine standard Pine Script timeframe identifiers
+    const tfPeriod =
+      timeframeSeconds === 5 ? '5S' :
+      timeframeSeconds === 15 ? '15S' :
+      timeframeSeconds === 30 ? '30S' :
+      timeframeSeconds === 60 ? '1' :
+      timeframeSeconds === 300 ? '5' :
+      timeframeSeconds === 900 ? '15' :
+      timeframeSeconds === 3600 ? '60' :
+      timeframeSeconds === 14400 ? '240' :
+      timeframeSeconds === 86400 ? 'D' :
+      `${Math.max(1, Math.round(timeframeSeconds / 60))}`;
+
+    const tfMultiplier =
+      timeframeSeconds < 60
+        ? timeframeSeconds
+        : timeframeSeconds < 86400
+        ? Math.max(1, Math.round(timeframeSeconds / 60))
+        : Math.max(1, Math.round(timeframeSeconds / 86400));
+
     // Initial default environment values
     env.close = closes;
     env.open = candles.map((c) => c.open);
@@ -1138,6 +1179,16 @@ export function executePineScript(
     env.last_bar_index = len - 1;
     env.time = times;
     env.na = null;
+
+    // Timeframe built-in variables
+    env['timeframe.period'] = tfPeriod;
+    env['timeframe.multiplier'] = tfMultiplier;
+    env['timeframe.isseconds'] = timeframeSeconds < 60;
+    env['timeframe.isminutes'] = timeframeSeconds >= 60 && timeframeSeconds < 86400;
+    env['timeframe.isintraday'] = timeframeSeconds < 86400;
+    env['timeframe.isdaily'] = timeframeSeconds >= 86400;
+    env['period'] = tfPeriod;
+    env['interval'] = tfMultiplier;
 
     env['barstate.isconfirmed'] = true;
     env['barstate.isfirst'] = false;
@@ -1692,6 +1743,7 @@ export function executePineScript(
       scriptName,
       scriptType,
       isOverlay,
+      timeframe: timeframeSeconds,
       plots,
       hlines,
       markers,
