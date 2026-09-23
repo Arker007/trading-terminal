@@ -10,6 +10,24 @@ import {
 } from '../types/pine';
 
 /**
+ * Sanitizes and guarantees strictly ascending, deduplicated timestamps and valid numbers for chart rendering.
+ */
+export function sanitizePlotData(data: { time: number; value: number }[]): { time: number; value: number }[] {
+  if (!data || data.length === 0) return [];
+  const map = new Map<number, number>();
+
+  for (let i = 0; i < data.length; i++) {
+    const pt = data[i];
+    if (pt && typeof pt.time === 'number' && !isNaN(pt.time) && typeof pt.value === 'number' && !isNaN(pt.value) && isFinite(pt.value)) {
+      map.set(pt.time, pt.value);
+    }
+  }
+
+  const sortedTimes = Array.from(map.keys()).sort((a, b) => a - b);
+  return sortedTimes.map((t) => ({ time: t, value: map.get(t)! }));
+}
+
+/**
  * Splits a string by delimiter only when not inside quotes, parentheses, brackets, or braces.
  */
 export function splitTopLevel(str: string, delimiter: string = ','): string[] {
@@ -153,79 +171,153 @@ export function resolvePineColor(colorStr?: string, defaultGreen = true): string
 }
 
 /**
- * Technical Analysis Calculations
+ * Safe Technical Analysis Calculations
  */
-function calcSMA(series: number[], period: number): (number | null)[] {
+function calcSMA(series: (number | null)[], period: number): (number | null)[] {
   const result: (number | null)[] = new Array(series.length).fill(null);
   if (period <= 0 || series.length < period) return result;
 
   let sum = 0;
+  let count = 0;
+
   for (let i = 0; i < series.length; i++) {
-    sum += series[i];
-    if (i >= period) {
-      sum -= series[i - period];
+    const v = series[i];
+    if (v !== null && !isNaN(v)) {
+      sum += v;
+      count++;
     }
-    if (i >= period - 1) {
+
+    if (i >= period) {
+      const oldV = series[i - period];
+      if (oldV !== null && !isNaN(oldV)) {
+        sum -= oldV;
+        count--;
+      }
+    }
+
+    if (i >= period - 1 && count >= period) {
       result[i] = sum / period;
     }
   }
   return result;
 }
 
-function calcEMA(series: number[], period: number): (number | null)[] {
+function calcEMA(series: (number | null)[], period: number): (number | null)[] {
   const result: (number | null)[] = new Array(series.length).fill(null);
   if (period <= 0 || series.length < period) return result;
 
   const k = 2 / (period + 1);
-  let ema = series.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  let initSum = 0;
+  let validCount = 0;
+
+  for (let i = 0; i < period && i < series.length; i++) {
+    const v = series[i];
+    if (v !== null && !isNaN(v)) {
+      initSum += v;
+      validCount++;
+    }
+  }
+
+  if (validCount === 0) return result;
+  let ema = initSum / validCount;
   result[period - 1] = ema;
 
   for (let i = period; i < series.length; i++) {
-    ema = series[i] * k + ema * (1 - k);
-    result[i] = ema;
+    const v = series[i];
+    if (v !== null && !isNaN(v)) {
+      ema = v * k + ema * (1 - k);
+      result[i] = ema;
+    } else {
+      result[i] = ema;
+    }
   }
   return result;
 }
 
-function calcRMA(series: number[], period: number): (number | null)[] {
+function calcRMA(series: (number | null)[], period: number): (number | null)[] {
   const result: (number | null)[] = new Array(series.length).fill(null);
   if (period <= 0 || series.length < period) return result;
 
   const alpha = 1 / period;
-  let rma = series.slice(0, period).reduce((a, b) => a + b, 0) / period;
+  let initSum = 0;
+  let validCount = 0;
+
+  for (let i = 0; i < period && i < series.length; i++) {
+    const v = series[i];
+    if (v !== null && !isNaN(v)) {
+      initSum += v;
+      validCount++;
+    }
+  }
+
+  if (validCount === 0) return result;
+  let rma = initSum / validCount;
   result[period - 1] = rma;
 
   for (let i = period; i < series.length; i++) {
-    rma = alpha * series[i] + (1 - alpha) * rma;
-    result[i] = rma;
+    const v = series[i];
+    if (v !== null && !isNaN(v)) {
+      rma = alpha * v + (1 - alpha) * rma;
+      result[i] = rma;
+    } else {
+      result[i] = rma;
+    }
   }
   return result;
 }
 
-function calcWMA(series: number[], period: number): (number | null)[] {
+function calcWMA(series: (number | null)[], period: number): (number | null)[] {
   const result: (number | null)[] = new Array(series.length).fill(null);
   if (period <= 0 || series.length < period) return result;
 
   const norm = (period * (period + 1)) / 2;
   for (let i = period - 1; i < series.length; i++) {
     let sum = 0;
+    let valid = true;
     for (let j = 0; j < period; j++) {
-      sum += series[i - j] * (period - j);
+      const v = series[i - j];
+      if (v === null || isNaN(v)) {
+        valid = false;
+        break;
+      }
+      sum += v * (period - j);
     }
-    result[i] = sum / norm;
+    if (valid) {
+      result[i] = sum / norm;
+    }
   }
   return result;
 }
 
-function calcRSI(series: number[], period: number = 14): (number | null)[] {
-  const result: (number | null)[] = new Array(series.length).fill(null);
-  if (series.length <= period) return result;
+function calcHMA(series: (number | null)[], period: number): (number | null)[] {
+  const halfPeriod = Math.max(1, Math.floor(period / 2));
+  const sqrtPeriod = Math.max(1, Math.floor(Math.sqrt(period)));
+
+  const wmaHalf = calcWMA(series, halfPeriod);
+  const wmaFull = calcWMA(series, period);
+
+  const diff: (number | null)[] = new Array(series.length).fill(null);
+  for (let i = 0; i < series.length; i++) {
+    if (wmaHalf[i] !== null && wmaFull[i] !== null) {
+      diff[i] = 2 * wmaHalf[i]! - wmaFull[i]!;
+    }
+  }
+
+  return calcWMA(diff, sqrtPeriod);
+}
+
+function calcRSI(series: (number | null)[], period: number = 14): (number | null)[] {
+  const len = series.length;
+  const result: (number | null)[] = new Array(len).fill(null);
+  if (len <= period || period <= 0) return result;
 
   let gains = 0;
   let losses = 0;
 
   for (let i = 1; i <= period; i++) {
-    const diff = series[i] - series[i - 1];
+    const curr = series[i] ?? 0;
+    const prev = series[i - 1] ?? 0;
+    const diff = curr - prev;
     if (diff >= 0) gains += diff;
     else losses -= diff;
   }
@@ -234,14 +326,16 @@ function calcRSI(series: number[], period: number = 14): (number | null)[] {
   let avgLoss = losses / period;
 
   if (avgLoss === 0) {
-    result[period] = 100;
+    result[period] = avgGain === 0 ? 50 : 100;
   } else {
     const rs = avgGain / avgLoss;
     result[period] = 100 - 100 / (1 + rs);
   }
 
-  for (let i = period + 1; i < series.length; i++) {
-    const diff = series[i] - series[i - 1];
+  for (let i = period + 1; i < len; i++) {
+    const curr = series[i] ?? 0;
+    const prev = series[i - 1] ?? 0;
+    const diff = curr - prev;
     const gain = diff > 0 ? diff : 0;
     const loss = diff < 0 ? -diff : 0;
 
@@ -249,7 +343,7 @@ function calcRSI(series: number[], period: number = 14): (number | null)[] {
     avgLoss = (avgLoss * (period - 1) + loss) / period;
 
     if (avgLoss === 0) {
-      result[i] = 100;
+      result[i] = avgGain === 0 ? 50 : 100;
     } else {
       const rs = avgGain / avgLoss;
       result[i] = 100 - 100 / (1 + rs);
@@ -260,9 +354,10 @@ function calcRSI(series: number[], period: number = 14): (number | null)[] {
 }
 
 function calcTR(candles: FormattedCandle[]): number[] {
-  const trs: number[] = [candles[0].high - candles[0].low];
+  if (!candles || candles.length === 0) return [];
+  const trs: number[] = [Math.max(0, candles[0].high - candles[0].low)];
   for (let i = 1; i < candles.length; i++) {
-    const hl = candles[i].high - candles[i].low;
+    const hl = Math.max(0, candles[i].high - candles[i].low);
     const hc = Math.abs(candles[i].high - candles[i - 1].close);
     const lc = Math.abs(candles[i].low - candles[i - 1].close);
     trs.push(Math.max(hl, hc, lc));
@@ -272,7 +367,7 @@ function calcTR(candles: FormattedCandle[]): number[] {
 
 function calcATR(candles: FormattedCandle[], period: number = 14): (number | null)[] {
   const result: (number | null)[] = new Array(candles.length).fill(null);
-  if (candles.length < period) return result;
+  if (candles.length < period || period <= 0) return result;
 
   const trs = calcTR(candles);
   let atr = trs.slice(0, period).reduce((a, b) => a + b, 0) / period;
@@ -309,7 +404,7 @@ function calcSum(series: (number | null)[], period: number): (number | null)[] {
 }
 
 function calcBollingerBands(
-  series: number[],
+  series: (number | null)[],
   period: number = 20,
   mult: number = 2
 ): { upper: (number | null)[]; basis: (number | null)[]; lower: (number | null)[] } {
@@ -321,12 +416,21 @@ function calcBollingerBands(
     const mean = basis[i];
     if (mean === null) continue;
 
-    const slice = series.slice(i - period + 1, i + 1);
-    const variance = slice.reduce((sum, val) => sum + Math.pow(val - mean, 2), 0) / period;
-    const stdDev = Math.sqrt(variance);
+    let varianceSum = 0;
+    let validCount = 0;
+    for (let j = 0; j < period; j++) {
+      const val = series[i - j];
+      if (val !== null && !isNaN(val)) {
+        varianceSum += Math.pow(val - mean, 2);
+        validCount++;
+      }
+    }
 
-    upper[i] = mean + mult * stdDev;
-    lower[i] = mean - mult * stdDev;
+    if (validCount >= period) {
+      const stdDev = Math.sqrt(varianceSum / period);
+      upper[i] = mean + mult * stdDev;
+      lower[i] = mean - mult * stdDev;
+    }
   }
 
   return { upper, basis, lower };
@@ -339,7 +443,7 @@ function calcSupertrend(
 ): { supertrend: (number | null)[]; direction: (number | null)[] } {
   const supertrend: (number | null)[] = new Array(candles.length).fill(null);
   const direction: (number | null)[] = new Array(candles.length).fill(null);
-  if (candles.length < period) return { supertrend, direction };
+  if (candles.length < period || period <= 0) return { supertrend, direction };
 
   const atr = calcATR(candles, period);
   const upperBands: number[] = new Array(candles.length).fill(0);
@@ -382,7 +486,7 @@ function calcSupertrend(
 }
 
 function calcMACD(
-  series: number[],
+  series: (number | null)[],
   fastPeriod: number = 12,
   slowPeriod: number = 26,
   signalPeriod: number = 9
@@ -403,7 +507,7 @@ function calcMACD(
   const hist: (number | null)[] = new Array(len).fill(null);
 
   if (validMACDIdx !== -1) {
-    const macdClean = macd.slice(validMACDIdx) as number[];
+    const macdClean = macd.slice(validMACDIdx);
     const sigClean = calcEMA(macdClean, signalPeriod);
 
     for (let i = 0; i < sigClean.length; i++) {
@@ -420,11 +524,13 @@ function calcMACD(
 
 function calcHighest(series: (number | null)[], period: number): (number | null)[] {
   const result: (number | null)[] = new Array(series.length).fill(null);
+  if (period <= 0 || series.length === 0) return result;
+
   for (let i = period - 1; i < series.length; i++) {
     let max = -Infinity;
     for (let j = 0; j < period; j++) {
       const v = series[i - j];
-      if (v !== null && v > max) max = v;
+      if (v !== null && !isNaN(v) && v > max) max = v;
     }
     if (max !== -Infinity) result[i] = max;
   }
@@ -433,11 +539,13 @@ function calcHighest(series: (number | null)[], period: number): (number | null)
 
 function calcLowest(series: (number | null)[], period: number): (number | null)[] {
   const result: (number | null)[] = new Array(series.length).fill(null);
+  if (period <= 0 || series.length === 0) return result;
+
   for (let i = period - 1; i < series.length; i++) {
     let min = Infinity;
     for (let j = 0; j < period; j++) {
       const v = series[i - j];
-      if (v !== null && v < min) min = v;
+      if (v !== null && !isNaN(v) && v < min) min = v;
     }
     if (min !== Infinity) result[i] = min;
   }
@@ -458,13 +566,14 @@ function calcStochSeries(
     for (let j = 0; j < period; j++) {
       const hv = highSeries[i - j];
       const lv = lowSeries[i - j];
-      if (hv !== null && hv > h) h = hv;
-      if (lv !== null && lv < l) l = lv;
+      if (hv !== null && !isNaN(hv) && hv > h) h = hv;
+      if (lv !== null && !isNaN(lv) && lv < l) l = lv;
     }
     const c = closeSeries[i];
-    if (c !== null && h !== -Infinity && l !== Infinity && h !== l) {
-      result[i] = ((c - l) / (h - l)) * 100;
-    } else if (c !== null) {
+    if (c !== null && !isNaN(c) && h !== -Infinity && l !== Infinity) {
+      const diff = h - l;
+      result[i] = diff > 0 ? ((c - l) / diff) * 100 : 50;
+    } else if (c !== null && !isNaN(c)) {
       result[i] = 50;
     }
   }
@@ -539,6 +648,7 @@ export function evaluateSeriesExpression(
   const hl2 = candles.map((c) => (c.high + c.low) / 2);
   const hlc3 = candles.map((c) => (c.high + c.low + c.close) / 3);
   const ohlc4 = candles.map((c) => (c.open + c.high + c.low + c.close) / 4);
+  const hlcc4 = candles.map((c) => (c.high + c.low + 2 * c.close) / 4);
 
   // 0. na / null handling
   if (trimmed === 'na' || trimmed === 'null' || trimmed === 'nan' || trimmed === 'undefined') {
@@ -567,6 +677,7 @@ export function evaluateSeriesExpression(
   if (trimmed === 'hl2') return hl2;
   if (trimmed === 'hlc3') return hlc3;
   if (trimmed === 'ohlc4') return ohlc4;
+  if (trimmed === 'hlcc4') return hlcc4;
   if (trimmed === 'bar_index') return Array.from({ length: len }, (_, i) => i);
   if (trimmed === 'time') return candles.map((c) => c.time);
 
@@ -604,12 +715,36 @@ export function evaluateSeriesExpression(
     }
   }
 
-  // 5. Function Calls: ta.sma, ta.ema, ta.rsi, ta.macd, ta.bb, ta.atr, ta.wma, ta.rma, ta.vwma, ta.highest, ta.lowest, ta.change, ta.mom, ta.stoch, ta.cci, ta.tr, math.*
+  // 5. Function Calls: nz, fixnan, ta.sma, ta.ema, ta.rsi, ta.macd, ta.bb, ta.atr, ta.wma, ta.rma, ta.hma, ta.vwma, ta.highest, ta.lowest, ta.change, ta.mom, ta.stoch, ta.cci, ta.tr, math.*
   const fnMatch = trimmed.match(/^(?:ta\.|math\.)?([a-zA-Z0-9_]+)\s*\((.*)\)$/i);
   if (fnMatch) {
     const fnName = fnMatch[1].toLowerCase();
     const argsStr = fnMatch[2];
     const { positional, named } = parseArguments(argsStr);
+
+    // nz(source, replacement)
+    if (fnName === 'nz') {
+      const srcStr = named.source || positional[0] || 'close';
+      const replStr = named.replacement || positional[1] || '0';
+      const src = evaluateSeriesExpression(srcStr, env, candles, lineNum, errors) || new Array(len).fill(null);
+      const repl = evaluateNumericValue(replStr, env, 0);
+      return src.map((v) => (v === null || v === undefined || isNaN(v) ? repl : v));
+    }
+
+    // fixnan(source)
+    if (fnName === 'fixnan') {
+      const srcStr = named.source || positional[0] || 'close';
+      const src = evaluateSeriesExpression(srcStr, env, candles, lineNum, errors) || closes;
+      const out: (number | null)[] = new Array(len).fill(null);
+      let lastValid: number | null = null;
+      for (let i = 0; i < len; i++) {
+        if (src[i] !== null && !isNaN(src[i]!)) {
+          lastValid = src[i];
+        }
+        out[i] = lastValid;
+      }
+      return out;
+    }
 
     // ta.sma(source, length)
     if (fnName === 'sma') {
@@ -621,7 +756,7 @@ export function evaluateSeriesExpression(
       }
       const src = evaluateSeriesExpression(srcStr, env, candles, lineNum, errors) || closes;
       const period = evaluateNumericValue(lenStr, env, 14);
-      return calcSMA(src.map((v) => v ?? 0), period);
+      return calcSMA(src, period);
     }
 
     // ta.ema(source, length)
@@ -634,7 +769,7 @@ export function evaluateSeriesExpression(
       }
       const src = evaluateSeriesExpression(srcStr, env, candles, lineNum, errors) || closes;
       const period = evaluateNumericValue(lenStr, env, 14);
-      return calcEMA(src.map((v) => v ?? 0), period);
+      return calcEMA(src, period);
     }
 
     // ta.wma(source, length)
@@ -647,7 +782,20 @@ export function evaluateSeriesExpression(
       }
       const src = evaluateSeriesExpression(srcStr, env, candles, lineNum, errors) || closes;
       const period = evaluateNumericValue(lenStr, env, 14);
-      return calcWMA(src.map((v) => v ?? 0), period);
+      return calcWMA(src, period);
+    }
+
+    // ta.hma(source, length)
+    if (fnName === 'hma') {
+      let srcStr = named.source || positional[0] || 'close';
+      let lenStr = named.length || positional[1] || '14';
+      if (positional.length === 1 && !isNaN(parseFloat(positional[0]))) {
+        srcStr = 'close';
+        lenStr = positional[0];
+      }
+      const src = evaluateSeriesExpression(srcStr, env, candles, lineNum, errors) || closes;
+      const period = evaluateNumericValue(lenStr, env, 14);
+      return calcHMA(src, period);
     }
 
     // ta.rma(source, length)
@@ -660,7 +808,7 @@ export function evaluateSeriesExpression(
       }
       const src = evaluateSeriesExpression(srcStr, env, candles, lineNum, errors) || closes;
       const period = evaluateNumericValue(lenStr, env, 14);
-      return calcRMA(src.map((v) => v ?? 0), period);
+      return calcRMA(src, period);
     }
 
     // ta.vwma(source, length)
@@ -685,7 +833,7 @@ export function evaluateSeriesExpression(
       }
       const src = evaluateSeriesExpression(srcStr, env, candles, lineNum, errors) || closes;
       const period = evaluateNumericValue(lenStr, env, 14);
-      return calcRSI(src.map((v) => v ?? 0), period);
+      return calcRSI(src, period);
     }
 
     // ta.atr(length)
@@ -787,8 +935,8 @@ export function evaluateSeriesExpression(
       return calcCCI(candles, period);
     }
 
-    // math.abs, math.max, math.min, math.sqrt, math.round, math.floor, math.ceil
-    if (['abs', 'max', 'min', 'sqrt', 'pow', 'round', 'floor', 'ceil'].includes(fnName)) {
+    // math.abs, math.max, math.min, math.sqrt, math.round, math.floor, math.ceil, math.pow, math.sign
+    if (['abs', 'max', 'min', 'sqrt', 'pow', 'round', 'floor', 'ceil', 'sign', 'avg'].includes(fnName)) {
       const arg1 = evaluateSeriesExpression(positional[0] || '0', env, candles, lineNum, errors) || new Array(len).fill(0);
       const arg2 = positional[1]
         ? evaluateSeriesExpression(positional[1], env, candles, lineNum, errors) || new Array(len).fill(0)
@@ -804,9 +952,11 @@ export function evaluateSeriesExpression(
         else if (fnName === 'round') out[i] = Math.round(v1);
         else if (fnName === 'floor') out[i] = Math.floor(v1);
         else if (fnName === 'ceil') out[i] = Math.ceil(v1);
+        else if (fnName === 'sign') out[i] = Math.sign(v1);
         else if (fnName === 'max' && v2 !== null) out[i] = Math.max(v1, v2);
         else if (fnName === 'min' && v2 !== null) out[i] = Math.min(v1, v2);
         else if (fnName === 'pow' && v2 !== null) out[i] = Math.pow(v1, v2);
+        else if (fnName === 'avg' && v2 !== null) out[i] = (v1 + v2) / 2;
       }
       return out;
     }
@@ -825,7 +975,8 @@ export function evaluateSeriesExpression(
     }
   }
 
-  // 6. Binary arithmetic: a + b, a - b, a * b, a / b
+  // 6. Binary arithmetic with proper precedence:
+  // First evaluate Addition / Subtraction
   const topTokensPlusMinus = splitTopLevel(trimmed, '+');
   if (topTokensPlusMinus.length > 1) {
     let acc = evaluateSeriesExpression(topTokensPlusMinus[0], env, candles, lineNum, errors);
@@ -963,7 +1114,47 @@ export function evaluateBooleanExpression(
     return out;
   }
 
-  // 1b. ta.cross(a, b)
+  // 1b. ta.rising(source, length)
+  const risingMatch = trimmed.match(/^(?:ta\.)?rising\s*\((.*)\)$/i);
+  if (risingMatch) {
+    const { positional, named } = parseArguments(risingMatch[1]);
+    const src = evaluateSeriesExpression(named.source || positional[0] || 'close', env, candles, lineNum, errors) || closes;
+    const period = evaluateNumericValue(named.length || positional[1] || '1', env, 1);
+    const out: boolean[] = new Array(len).fill(false);
+    for (let i = period; i < len; i++) {
+      let isRising = true;
+      for (let j = 0; j < period; j++) {
+        if (src[i - j] === null || src[i - j - 1] === null || src[i - j]! <= src[i - j - 1]!) {
+          isRising = false;
+          break;
+        }
+      }
+      out[i] = isRising;
+    }
+    return out;
+  }
+
+  // 1c. ta.falling(source, length)
+  const fallingMatch = trimmed.match(/^(?:ta\.)?falling\s*\((.*)\)$/i);
+  if (fallingMatch) {
+    const { positional, named } = parseArguments(fallingMatch[1]);
+    const src = evaluateSeriesExpression(named.source || positional[0] || 'close', env, candles, lineNum, errors) || closes;
+    const period = evaluateNumericValue(named.length || positional[1] || '1', env, 1);
+    const out: boolean[] = new Array(len).fill(false);
+    for (let i = period; i < len; i++) {
+      let isFalling = true;
+      for (let j = 0; j < period; j++) {
+        if (src[i - j] === null || src[i - j - 1] === null || src[i - j]! >= src[i - j - 1]!) {
+          isFalling = false;
+          break;
+        }
+      }
+      out[i] = isFalling;
+    }
+    return out;
+  }
+
+  // 1d. ta.cross(a, b)
   const crossMatch = trimmed.match(/^(?:ta\.)?cross\s*\((.*)\)$/i);
   if (crossMatch && !crossMatch[0].toLowerCase().includes('crossover') && !crossMatch[0].toLowerCase().includes('crossunder')) {
     const { positional, named } = parseArguments(crossMatch[1]);
@@ -1099,7 +1290,7 @@ export function evaluateBooleanExpression(
 }
 
 /**
- * Executes a Pine Script v5 code against historical candles
+ * Executes Pine Script v5 code against historical candles safely
  */
 export function executePineScript(
   scriptCode: string,
@@ -1171,10 +1362,11 @@ export function executePineScript(
     env.open = candles.map((c) => c.open);
     env.high = highs;
     env.low = lows;
-    env.volume = candles.map((c) => c.volume);
+    env.volume = candles.map((c) => c.volume ?? 0);
     env.hl2 = candles.map((c) => (c.high + c.low) / 2);
     env.hlc3 = candles.map((c) => (c.high + c.low + c.close) / 3);
     env.ohlc4 = candles.map((c) => (c.open + c.high + c.low + c.close) / 4);
+    env.hlcc4 = candles.map((c) => (c.high + c.low + 2 * c.close) / 4);
     env.bar_index = Array.from({ length: len }, (_, i) => i);
     env.last_bar_index = len - 1;
     env.time = times;
@@ -1190,9 +1382,16 @@ export function executePineScript(
     env['period'] = tfPeriod;
     env['interval'] = tfMultiplier;
 
+    // Symbol & Barstate info
+    env['syminfo.tickerid'] = 'BINOMO:CRYPTO_IDX';
+    env['syminfo.mintick'] = 0.01;
+    env['syminfo.pointvalue'] = 1;
+
     env['barstate.isconfirmed'] = true;
     env['barstate.isfirst'] = false;
     env['barstate.islast'] = true;
+    env['barstate.isnew'] = false;
+
     env['location.absolute'] = 'absolute';
     env['location.belowbar'] = 'belowBar';
     env['location.abovebar'] = 'aboveBar';
@@ -1200,12 +1399,18 @@ export function executePineScript(
     env['shape.labeldown'] = 'arrowDown';
     env['shape.triangleup'] = 'arrowUp';
     env['shape.triangledown'] = 'arrowDown';
+    env['shape.circle'] = 'circle';
+    env['shape.square'] = 'square';
     env['size.small'] = 'small';
     env['size.normal'] = 'normal';
     env['color.green'] = '#22c55e';
     env['color.red'] = '#ef4444';
     env['color.white'] = '#ffffff';
     env['color.black'] = '#0f172a';
+    env['color.blue'] = '#3b82f6';
+    env['color.orange'] = '#f97316';
+    env['color.yellow'] = '#eab308';
+    env['color.purple'] = '#a855f7';
 
     let scriptName = 'Custom Pine Script';
     let scriptType: 'indicator' | 'strategy' = 'indicator';
@@ -1323,7 +1528,7 @@ export function executePineScript(
     }
 
     // 1. First Pass: Detect Script Header (indicator, study, strategy)
-    for (const { raw, lineNum } of flattenedLines) {
+    for (const { raw } of flattenedLines) {
       if (raw.startsWith('indicator(') || raw.startsWith('study(')) {
         scriptType = 'indicator';
         const match = raw.match(/(?:indicator|study)\s*\((.*)\)/i);
@@ -1382,7 +1587,6 @@ export function executePineScript(
         const condSeries = evaluateBooleanExpression(item.condExpr, env, candles, lineNum, errors);
         if (condSeries) {
           for (const bodyStmt of item.bodyLines) {
-            // Check variable assignment inside if block: var := expr or float var = expr or var = expr
             const assignMatch = bodyStmt.match(/^(?:var(?:ip)?\s+)?(?:series\s+)?(?:float|int|bool|color|string)?\s*([a-zA-Z0-9_]+)\s*[:=]+\s*(.*)/i);
             if (assignMatch) {
               const vName = assignMatch[1].trim();
@@ -1405,6 +1609,9 @@ export function executePineScript(
                     const numVal = parseFloat(exprStr);
                     env[vName][idx] = isNaN(numVal) ? exprStr.replace(/['"]/g, '') : numVal;
                   }
+                } else if (idx > 0 && bodyStmt.includes('var ')) {
+                  // Keep persistent value if var declared
+                  env[vName][idx] = env[vName][idx - 1];
                 }
               }
             }
@@ -1451,20 +1658,24 @@ export function executePineScript(
 
           const seriesData = evaluateSeriesExpression(seriesExpr, env, candles, lineNum, errors);
           if (seriesData) {
-            const points: { time: number; value: number }[] = [];
+            const rawPoints: { time: number; value: number }[] = [];
             for (let i = 0; i < len; i++) {
               const v = seriesData[i];
-              if (v !== null && !isNaN(v)) {
-                points.push({ time: times[i], value: v });
+              if (v !== null && !isNaN(v) && isFinite(v)) {
+                rawPoints.push({ time: times[i], value: v });
               }
             }
+
+            // Guarantee strictly sorted and deduplicated plot points
+            const cleanPoints = sanitizePlotData(rawPoints);
+
             plots.push({
               id: `plot-${plots.length + 1}`,
               title: plotTitle,
               color,
               lineWidth,
               style: isHistogram ? 'histogram' : 'line',
-              data: points,
+              data: cleanPoints,
             });
           }
         }
@@ -1486,7 +1697,7 @@ export function executePineScript(
             const isSell = styleStr.includes('labeldown') || styleStr.includes('triangledown') || styleStr.includes('arrowdown') || titleStr.includes('sell') || rawLower.includes('sell');
             const color = named.color ? resolvePineColor(named.color, !isSell) : isSell ? '#ef4444' : '#22c55e';
             const shape = isSell ? 'arrowDown' : 'arrowUp';
-            
+
             let pos: 'aboveBar' | 'belowBar' = isSell ? 'aboveBar' : 'belowBar';
             if (named.location) {
               const locStr = named.location.toLowerCase();
@@ -1569,7 +1780,7 @@ export function executePineScript(
             const src = evaluateSeriesExpression(srcStr, env, candles, lineNum, errors) || closes;
             const period = evaluateNumericValue(lenStr, env, 20);
             const mult = evaluateNumericValue(multStr, env, 2);
-            const { upper, basis, lower } = calcBollingerBands(src.map((v) => v ?? 0), period, mult);
+            const { upper, basis, lower } = calcBollingerBands(src, period, mult);
             if (varNames[0]) env[varNames[0]] = basis;
             if (varNames[1]) env[varNames[1]] = upper;
             if (varNames[2]) env[varNames[2]] = lower;
@@ -1587,7 +1798,7 @@ export function executePineScript(
             const slow = evaluateNumericValue(named.slow || positional[2] || '26', env, 26);
             const sig = evaluateNumericValue(named.signal || positional[3] || '9', env, 9);
             const src = evaluateSeriesExpression(srcStr, env, candles, lineNum, errors) || closes;
-            const { macd, signal, hist } = calcMACD(src.map((v) => v ?? 0), fast, slow, sig);
+            const { macd, signal, hist } = calcMACD(src, fast, slow, sig);
             if (varNames[0]) env[varNames[0]] = macd;
             if (varNames[1]) env[varNames[1]] = signal;
             if (varNames[2]) env[varNames[2]] = hist;
@@ -1621,8 +1832,8 @@ export function executePineScript(
             const smoothK = evaluateNumericValue(named.smoothk || positional[1] || '3', env, 3);
             const smoothD = evaluateNumericValue(named.smoothd || positional[2] || '3', env, 3);
 
-            const kVal = calcSMA((stochVal.map(v => v ?? 0)), smoothK);
-            const dVal = calcSMA((kVal.map(v => v ?? 0)), smoothD);
+            const kVal = calcSMA(stochVal, smoothK);
+            const dVal = calcSMA(kVal, smoothD);
 
             if (varNames[0]) env[varNames[0]] = kVal;
             if (varNames[1]) env[varNames[1]] = dVal;
@@ -1636,6 +1847,7 @@ export function executePineScript(
       if (assignMatch) {
         const varName = assignMatch[1].trim();
         const expr = assignMatch[2].trim();
+        const isVarDeclared = raw.startsWith('var ') || raw.startsWith('varip ');
 
         // 1. Input statement: name = input(14, "Length") or input.int(...)
         if (expr.startsWith('input(') || expr.startsWith('input.')) {
@@ -1663,6 +1875,14 @@ export function executePineScript(
         // 2. Boolean series expression
         const boolSeries = evaluateBooleanExpression(expr, env, candles, lineNum, errors);
         if (boolSeries) {
+          if (isVarDeclared && env[varName] && Array.isArray(env[varName])) {
+            // Carry forward persistent state
+            for (let bIdx = 1; bIdx < len; bIdx++) {
+              if (boolSeries[bIdx] === null || boolSeries[bIdx] === undefined) {
+                boolSeries[bIdx] = boolSeries[bIdx - 1];
+              }
+            }
+          }
           env[varName] = boolSeries;
           continue;
         }
@@ -1670,6 +1890,13 @@ export function executePineScript(
         // 3. Numeric series expression
         const numSeries = evaluateSeriesExpression(expr, env, candles, lineNum, errors);
         if (numSeries) {
+          if (isVarDeclared && env[varName] && Array.isArray(env[varName])) {
+            for (let bIdx = 1; bIdx < len; bIdx++) {
+              if (numSeries[bIdx] === null || numSeries[bIdx] === undefined || isNaN(numSeries[bIdx]!)) {
+                numSeries[bIdx] = numSeries[bIdx - 1];
+              }
+            }
+          }
           env[varName] = numSeries;
           continue;
         }
@@ -1681,7 +1908,7 @@ export function executePineScript(
       }
     }
 
-    // 3. Strategy Statistics Calculation
+    // 3. Strategy Statistics Calculation (Safe execution without lookahead bias)
     let strategyStats: PineStrategyStats | undefined;
     if (scriptType === 'strategy' && trades.length > 0) {
       let winningTrades = 0;
@@ -1760,7 +1987,7 @@ export function executePineScript(
 }
 
 /**
- * Handles strategy.entry and strategy.close commands
+ * Handles strategy.entry, strategy.close, and strategy.exit commands with trade lifecycle tracking
  */
 function executeStrategyStatement(
   stmt: string,
@@ -1778,11 +2005,7 @@ function executeStrategyStatement(
   const action = match[1].toLowerCase();
   const { positional, named } = parseArguments(match[2]);
 
-  let whenSeries = conditionSeries;
-  if (named.when) {
-    // Already passed or parsed
-  }
-
+  const whenSeries = conditionSeries;
   const len = candles.length;
 
   if (action === 'entry') {

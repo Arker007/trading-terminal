@@ -150,6 +150,15 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
   const timeframePendingScrollRef = useRef<boolean>(true);
   const hasUserScrolledLeftRef = useRef<boolean>(false);
   const lastLoadMoreTriggerTimeRef = useRef<number>(0);
+  const savedViewStateRef = useRef<{
+    isAtLiveCandle: boolean;
+    centerTimestamp: number | null;
+    visibleTimeSpan: number | null;
+  }>({
+    isAtLiveCandle: true,
+    centerTimestamp: null,
+    visibleTimeSpan: null,
+  });
 
   // TradingView state & tools
   const [activeLegend, setActiveLegend] = useState<LegendValues | null>(null);
@@ -879,37 +888,78 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
         isAnimating: false,
       };
 
-      // If timeframe changed or reset is requested, guarantee instant focus on the live candle
+      // If timeframe changed or reset is requested, preserve exact scroll position and pin live candle / time area
       if (shouldResetToLive) {
         timeframePendingScrollRef.current = false;
         isTimeframeTransitioningRef.current = false;
-        hasUserScrolledLeftRef.current = false;
-        hasScrolledToLiveRef.current = true;
 
-        const performFocus = () => {
+        const viewState = savedViewStateRef.current;
+        const total = candles.length;
+
+        const performRestore = () => {
           if (!chartRef.current || !candles || candles.length === 0) return;
           try {
             const timeScale = chartRef.current.timeScale();
-            const total = candles.length;
-            const visibleBars = Math.min(total, 65);
-            timeScale.applyOptions({
-              rightOffset: 12,
-              barSpacing: 14,
-            });
-            timeScale.setVisibleLogicalRange({
-              from: Math.max(0, total - visibleBars),
-              to: total + 8,
-            });
-            timeScale.scrollToPosition(0, false);
+
+            if (viewState.isAtLiveCandle || !viewState.centerTimestamp) {
+              // User was viewing the live candle: keep the live candle pinned at the exact right position
+              hasUserScrolledLeftRef.current = false;
+              hasScrolledToLiveRef.current = true;
+              const visibleBars = Math.min(total, 65);
+              timeScale.applyOptions({
+                rightOffset: 12,
+                barSpacing: 14,
+              });
+              timeScale.setVisibleLogicalRange({
+                from: Math.max(0, total - visibleBars),
+                to: total + 8,
+              });
+              timeScale.scrollToPosition(0, false);
+            } else {
+              // User was inspecting a historical area / timestamp: preserve the visible center timestamp
+              const targetTime = viewState.centerTimestamp;
+              let bestIdx = -1;
+              let minDiff = Infinity;
+              for (let i = 0; i < candles.length; i++) {
+                const diff = Math.abs(candles[i].time - targetTime);
+                if (diff < minDiff) {
+                  minDiff = diff;
+                  bestIdx = i;
+                }
+              }
+
+              if (bestIdx >= 0) {
+                hasUserScrolledLeftRef.current = true;
+                hasScrolledToLiveRef.current = false;
+                const halfBars = Math.max(15, Math.min(35, Math.floor(total / 4)));
+                timeScale.applyOptions({
+                  rightOffset: 12,
+                  barSpacing: 14,
+                });
+                timeScale.setVisibleLogicalRange({
+                  from: Math.max(0, bestIdx - halfBars),
+                  to: Math.min(total + 5, bestIdx + halfBars),
+                });
+              } else {
+                hasUserScrolledLeftRef.current = false;
+                hasScrolledToLiveRef.current = true;
+                const visibleBars = Math.min(total, 65);
+                timeScale.setVisibleLogicalRange({
+                  from: Math.max(0, total - visibleBars),
+                  to: total + 8,
+                });
+                timeScale.scrollToPosition(0, false);
+              }
+            }
           } catch {}
           updateCandleCoords();
         };
 
-        performFocus();
-        requestAnimationFrame(performFocus);
-        setTimeout(performFocus, 30);
-        setTimeout(performFocus, 80);
-        setTimeout(performFocus, 180);
+        performRestore();
+        requestAnimationFrame(performRestore);
+        setTimeout(performRestore, 30);
+        setTimeout(performRestore, 80);
+        setTimeout(performRestore, 180);
       } else if (previousRange && oldOldestTime !== null && candles[0].time < oldOldestTime) {
         // Prevent scroll jump when loading older historical candles (pagination)
         const prependedCount = candles.findIndex((c) => c.time === oldOldestTime);
@@ -931,6 +981,34 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
 
   // Synchronize animCandleRef and clean overlays immediately whenever timeframe changes
   useEffect(() => {
+    // Capture the exact current view state before resetting overlays
+    if (chartRef.current) {
+      try {
+        const timeScale = chartRef.current.timeScale();
+        const logicalRange = timeScale.getVisibleLogicalRange();
+        const timeRange = timeScale.getVisibleRange();
+        const dataset = candlesRef.current;
+        const totalBars = dataset.length;
+
+        if (logicalRange && totalBars > 0) {
+          const offsetFromRight = totalBars - logicalRange.to;
+          const isAtLive = !hasUserScrolledLeftRef.current || offsetFromRight <= 3;
+          let centerTime: number | null = null;
+          let span: number | null = null;
+          if (timeRange && typeof timeRange.from === 'number' && typeof timeRange.to === 'number') {
+            centerTime = (timeRange.from + timeRange.to) / 2;
+            span = timeRange.to - timeRange.from;
+          }
+
+          savedViewStateRef.current = {
+            isAtLiveCandle: isAtLive,
+            centerTimestamp: centerTime,
+            visibleTimeSpan: span,
+          };
+        }
+      } catch {}
+    }
+
     isTimeframeTransitioningRef.current = true;
     timeframePendingScrollRef.current = true;
     hasScrolledToLiveRef.current = false;
