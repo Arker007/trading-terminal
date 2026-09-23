@@ -1398,20 +1398,47 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({
         const candleMinTime = candles[0].time;
         const candleMaxTime = candles[candles.length - 1].time;
 
-        const cleanMarkers = pineResult.markers
-          .filter((m) => {
-            if (typeof m.time !== 'number' || isNaN(m.time)) return false;
-            if (m.time < candleMinTime || m.time > candleMaxTime) return false;
-            return candleTimeSet.has(m.time);
-          })
+        const timeToMarkerMap = new Map<number, (typeof pineResult.markers)[0]>();
+
+        for (const m of pineResult.markers) {
+          if (typeof m.time !== 'number' || isNaN(m.time)) continue;
+          if (m.time < candleMinTime || m.time > candleMaxTime) continue;
+          if (!candleTimeSet.has(m.time)) continue;
+
+          const existing = timeToMarkerMap.get(m.time);
+          if (!existing) {
+            timeToMarkerMap.set(m.time, m);
+          } else {
+            // Prioritize breakout signals over swing/test signals on the same bar
+            const isExistingBreakout = (existing.text || '').includes('Breakout');
+            const isNewBreakout = (m.text || '').includes('Breakout');
+            if (isNewBreakout && !isExistingBreakout) {
+              timeToMarkerMap.set(m.time, m);
+            }
+          }
+        }
+
+        const cleanMarkers = Array.from(timeToMarkerMap.values())
           .sort((a, b) => a.time - b.time)
           .map((m) => {
-            const text = (m.text || '').replace(/[⇧⇩↑↓▲▼⇪]/g, '').trim();
+            const text = (m.text || '').trim();
+            const rawShape = m.shape || (m.position === 'belowBar' ? 'arrowUp' : 'arrowDown');
+            let validShape: 'arrowUp' | 'arrowDown' | 'circle' | 'square' = 'arrowUp';
+            if (rawShape === 'arrowDown' || rawShape === 'labelDown' || rawShape === 'triangleDown') {
+              validShape = 'arrowDown';
+            } else if (rawShape === 'circle') {
+              validShape = 'circle';
+            } else if (rawShape === 'square') {
+              validShape = 'square';
+            } else {
+              validShape = 'arrowUp';
+            }
+
             return {
               time: m.time as any,
-              position: m.position || 'aboveBar',
+              position: (m.position === 'inBar' ? 'aboveBar' : m.position) || 'aboveBar',
               color: m.color || (m.position === 'belowBar' ? '#22c55e' : '#ef4444'),
-              shape: m.shape || (m.position === 'belowBar' ? 'arrowUp' : 'arrowDown'),
+              shape: validShape,
               text,
               size: m.size || 1,
             };

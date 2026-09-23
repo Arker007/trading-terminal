@@ -16,14 +16,16 @@ import {
   CheckCircle2,
   TrendingUp,
   TrendingDown,
-  HelpCircle,
-  Sparkles,
   BookOpen,
+  Sliders,
+  Download,
+  Upload,
+  PlusCircle,
 } from 'lucide-react';
 import { FormattedCandle } from '../types';
-import { PineExecutionResult, PineTemplate } from '../types/pine';
+import { PineExecutionResult, PineTemplate, PineInputParam } from '../types/pine';
 import { PINE_TEMPLATES } from '../utils/pineTemplates';
-import { executePineScript } from '../utils/pineEngine';
+import { executePineScript, extractPineInputs } from '../utils/pineEngine';
 
 interface PineEditorProps {
   isOpen: boolean;
@@ -35,7 +37,7 @@ interface PineEditorProps {
   theme: 'dark' | 'light';
 }
 
-type EditorTab = 'editor' | 'strategy-tester' | 'plots' | 'console' | 'templates';
+type EditorTab = 'editor' | 'inputs' | 'strategy-tester' | 'plots' | 'console' | 'templates';
 
 export const PineEditor: React.FC<PineEditorProps> = ({
   isOpen,
@@ -47,17 +49,19 @@ export const PineEditor: React.FC<PineEditorProps> = ({
   theme,
 }) => {
   const [activeTab, setActiveTab] = useState<EditorTab>('editor');
-  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('ema-cross-strategy');
+  const [selectedTemplateId, setSelectedTemplateId] = useState<string>('ict-fvg-orderblocks');
   const [code, setCode] = useState<string>(PINE_TEMPLATES[0].code);
   const [isCompiled, setIsCompiled] = useState<boolean>(false);
   const [isMaximized, setIsMaximized] = useState<boolean>(false);
-  const [height, setHeight] = useState<number>(360);
+  const [height, setHeight] = useState<number>(380);
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [lastExecution, setLastExecution] = useState<PineExecutionResult | null>(activeExecutionResult);
   const [cursorPos, setCursorPos] = useState<{ line: number; col: number }>({ line: 1, col: 1 });
   const [saveSuccessNotice, setSaveSuccessNotice] = useState<boolean>(false);
+  const [customInputValues, setCustomInputValues] = useState<Record<string, any>>({});
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const isDark = theme === 'dark';
 
   // Load saved custom script from localStorage on init
@@ -67,60 +71,46 @@ export const PineEditor: React.FC<PineEditorProps> = ({
       if (savedCode) {
         setCode(savedCode);
       }
-    } catch {
-      // ignore
-    }
+    } catch {}
   }, []);
+
+  // Sync inputs dynamically when code changes
+  const extractedInputs = useMemo(() => {
+    return extractPineInputs(code);
+  }, [code]);
 
   // Handle template selection
   const handleSelectTemplate = (template: PineTemplate) => {
     setSelectedTemplateId(template.id);
     setCode(template.code);
+    setCustomInputValues({});
     setActiveTab('editor');
   };
 
   // Compile and Apply Script to Live Chart
-  const handleCompileAndApply = () => {
+  const handleCompileAndApply = (overrideInputs?: Record<string, any>) => {
     if (!code.trim()) return;
-    
-    console.group('[PineScript Flow] 1. Executing Script from PineEditor');
-    console.log('[PineScript Flow] Input code length:', code.length, 'chars | Market candles available:', candles.length);
-    
-    const startTime = performance.now();
-    const res = executePineScript(code, candles, currentTimeframe);
-    const elapsed = (performance.now() - startTime).toFixed(2);
-    
-    console.log('[PineScript Flow] Execution completed in ' + elapsed + 'ms', {
-      success: res.success,
-      scriptName: res.scriptName,
-      scriptType: res.scriptType,
-      isOverlay: res.isOverlay,
-      plotsCount: res.plots?.length || 0,
-      markersCount: res.markers?.length || 0,
-      hlinesCount: res.hlines?.length || 0,
-      tradesCount: res.trades?.length || 0,
-      errorsCount: res.errors?.length || 0,
-    });
 
-    if (res.logs && res.logs.length > 0) {
-      console.log('[PineScript Flow] Internal engine execution logs:', res.logs);
-    }
-
-    if (res.errors && res.errors.length > 0) {
-      console.warn('[PineScript Flow] Script compilation/execution errors:', res.errors);
-    }
+    const inputOverrides = overrideInputs || customInputValues;
+    const res = executePineScript(code, candles, currentTimeframe, inputOverrides);
 
     setLastExecution(res);
     setIsCompiled(true);
-
-    console.log('[PineScript Flow] Dispatching onApplyScriptResult to main chart container...');
     onApplyScriptResult(res, code);
-    console.groupEnd();
 
     if (res.scriptType === 'strategy' && res.trades && res.trades.length > 0) {
       setActiveTab('strategy-tester');
     } else if (res.errors.length > 0) {
       setActiveTab('console');
+    }
+  };
+
+  // Update a single input parameter dynamically
+  const handleInputChange = (varName: string, value: any) => {
+    const updated = { ...customInputValues, [varName]: value };
+    setCustomInputValues(updated);
+    if (isCompiled) {
+      handleCompileAndApply(updated);
     }
   };
 
@@ -140,10 +130,53 @@ export const PineEditor: React.FC<PineEditorProps> = ({
     } catch {}
   };
 
-  // Reset to current template original code
+  // Export / Download .pine file
+  const handleExportScript = () => {
+    const blob = new Blob([code], { type: 'text/plain;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `${(lastExecution?.scriptName || 'script').replace(/[^a-zA-Z0-9_-]/g, '_')}.pine`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // Import / Upload .pine or .txt file
+  const handleImportScript = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const content = event.target?.result as string;
+      if (content) {
+        setCode(content);
+        setCustomInputValues({});
+        setActiveTab('editor');
+      }
+    };
+    reader.readAsText(file);
+    if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  // Reset to template code
   const handleResetCode = () => {
     const t = PINE_TEMPLATES.find((item) => item.id === selectedTemplateId) || PINE_TEMPLATES[0];
     setCode(t.code);
+    setCustomInputValues({});
+  };
+
+  // Insert code snippet
+  const handleInsertSnippet = (snippet: string) => {
+    if (!textareaRef.current) return;
+    const textarea = textareaRef.current;
+    const start = textarea.selectionStart;
+    const end = textarea.selectionEnd;
+    const newCode = code.substring(0, start) + snippet + code.substring(end);
+    setCode(newCode);
+    setTimeout(() => {
+      textarea.focus();
+      textarea.selectionStart = textarea.selectionEnd = start + snippet.length;
+    }, 0);
   };
 
   // Code editor cursor tracking
@@ -186,12 +219,11 @@ export const PineEditor: React.FC<PineEditorProps> = ({
     }
   };
 
-  // Generate line numbers
   const lineCount = useMemo(() => {
     return code.split('\n').length;
   }, [code]);
 
-  // Drag resizing for the bottom dock
+  // Drag resizing for dock
   const handleMouseDownResize = (e: React.MouseEvent) => {
     e.preventDefault();
     setIsDragging(true);
@@ -201,7 +233,7 @@ export const PineEditor: React.FC<PineEditorProps> = ({
     const handleMouseMove = (e: MouseEvent) => {
       if (!isDragging) return;
       const newHeight = window.innerHeight - e.clientY;
-      if (newHeight >= 180 && newHeight <= window.innerHeight - 100) {
+      if (newHeight >= 200 && newHeight <= window.innerHeight - 100) {
         setHeight(newHeight);
       }
     };
@@ -227,7 +259,7 @@ export const PineEditor: React.FC<PineEditorProps> = ({
   return (
     <div
       id="tradingview-pine-editor-panel"
-      style={{ height: isMaximized ? '85vh' : `${height}px` }}
+      style={{ height: isMaximized ? '88vh' : `${height}px` }}
       className={`fixed bottom-0 left-0 right-0 z-40 flex flex-col border-t shadow-2xl backdrop-blur-md transition-[height] duration-75 ${
         isDark
           ? 'bg-[#131722]/98 border-[#2a2e39] text-[#d1d4dc]'
@@ -239,9 +271,7 @@ export const PineEditor: React.FC<PineEditorProps> = ({
         <div
           onMouseDown={handleMouseDownResize}
           className={`h-1.5 w-full cursor-ns-resize transition-colors ${
-            isDragging
-              ? 'bg-blue-500'
-              : 'bg-transparent hover:bg-blue-500/50'
+            isDragging ? 'bg-blue-500' : 'bg-transparent hover:bg-blue-500/50'
           }`}
           title="Drag to resize Pine Editor"
         />
@@ -249,63 +279,77 @@ export const PineEditor: React.FC<PineEditorProps> = ({
 
       {/* Pine Editor Header Toolbar */}
       <div
-        className={`flex items-center justify-between px-2.5 py-1 border-b text-xs select-none overflow-x-auto no-scrollbar gap-2 shrink-0 ${
+        className={`flex items-center justify-between px-3 py-1.5 border-b text-xs select-none overflow-x-auto no-scrollbar gap-2 shrink-0 ${
           isDark ? 'border-[#2a2e39] bg-[#1e222d]' : 'border-slate-200 bg-slate-50'
         }`}
       >
-        {/* Left: Tab selectors */}
-        <div className="flex items-center gap-1 shrink-0">
-          <div className="flex items-center gap-1.5 pr-2 mr-0.5 border-r border-slate-700/30 dark:border-slate-700 shrink-0 whitespace-nowrap">
+        {/* Left: Tabs */}
+        <div className="flex items-center gap-1.5 shrink-0">
+          <div className="flex items-center gap-1.5 pr-2 mr-1 border-r border-slate-700/30 dark:border-slate-700 shrink-0">
             <Code className="w-4 h-4 text-blue-500 shrink-0" />
-            <span className="font-bold tracking-tight text-[12.5px] whitespace-nowrap">Pine</span>
+            <span className="font-bold tracking-tight text-xs">Pine Editor</span>
             <span className="text-[10px] px-1.5 py-0.2 rounded font-mono font-semibold bg-blue-500/10 text-blue-500 shrink-0">
-              v5
+              v5 Full
             </span>
           </div>
 
           <div className="flex items-center gap-0.5 bg-slate-200/50 dark:bg-[#131722] p-0.5 rounded-md shrink-0">
             <button
               onClick={() => setActiveTab('editor')}
-              title="Pine Script Code Editor"
-              className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-all whitespace-nowrap shrink-0 cursor-pointer ${
+              className={`flex items-center gap-1 px-2.5 py-1 rounded text-xs font-medium transition-all shrink-0 cursor-pointer ${
                 activeTab === 'editor'
                   ? 'bg-blue-600 text-white shadow-xs font-semibold'
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              <FileCode className="w-3.5 h-3.5 shrink-0" />
+              <FileCode className="w-3.5 h-3.5" />
               <span>Editor</span>
             </button>
 
             <button
+              onClick={() => setActiveTab('inputs')}
+              className={`flex items-center gap-1 px-2.5 py-1 rounded text-xs font-medium transition-all shrink-0 cursor-pointer ${
+                activeTab === 'inputs'
+                  ? 'bg-blue-600 text-white shadow-xs font-semibold'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+              }`}
+            >
+              <Sliders className="w-3.5 h-3.5" />
+              <span>Inputs</span>
+              {extractedInputs.length > 0 && (
+                <span className="ml-0.5 px-1.5 py-0.2 rounded text-[10px] bg-blue-500/20 text-blue-400 font-bold">
+                  {extractedInputs.length}
+                </span>
+              )}
+            </button>
+
+            <button
               onClick={() => setActiveTab('strategy-tester')}
-              title="Strategy Tester & Performance Metrics"
-              className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-all whitespace-nowrap shrink-0 cursor-pointer ${
+              className={`flex items-center gap-1 px-2.5 py-1 rounded text-xs font-medium transition-all shrink-0 cursor-pointer ${
                 activeTab === 'strategy-tester'
                   ? 'bg-blue-600 text-white shadow-xs font-semibold'
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              <BarChart2 className="w-3.5 h-3.5 shrink-0" />
+              <BarChart2 className="w-3.5 h-3.5" />
               <span>Strategy</span>
               {currentResult?.strategyStats && (
-                <span className="ml-0.5 w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse shrink-0" />
+                <span className="ml-0.5 w-2 h-2 rounded-full bg-emerald-400 animate-pulse shrink-0" />
               )}
             </button>
 
             <button
               onClick={() => setActiveTab('plots')}
-              title="Plots, Signals & Indicators"
-              className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-all whitespace-nowrap shrink-0 cursor-pointer ${
+              className={`flex items-center gap-1 px-2.5 py-1 rounded text-xs font-medium transition-all shrink-0 cursor-pointer ${
                 activeTab === 'plots'
                   ? 'bg-blue-600 text-white shadow-xs font-semibold'
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              <Layers className="w-3.5 h-3.5 shrink-0" />
+              <Layers className="w-3.5 h-3.5" />
               <span>Plots</span>
               {currentResult?.plots && currentResult.plots.length > 0 && (
-                <span className="ml-0.5 px-1 py-0.2 rounded text-[10px] bg-slate-300 dark:bg-slate-700 leading-none">
+                <span className="ml-0.5 px-1 py-0.2 rounded text-[10px] bg-slate-300 dark:bg-slate-700">
                   {currentResult.plots.length}
                 </span>
               )}
@@ -313,30 +357,28 @@ export const PineEditor: React.FC<PineEditorProps> = ({
 
             <button
               onClick={() => setActiveTab('templates')}
-              title="Script Library & Presets"
-              className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-all whitespace-nowrap shrink-0 cursor-pointer ${
+              className={`flex items-center gap-1 px-2.5 py-1 rounded text-xs font-medium transition-all shrink-0 cursor-pointer ${
                 activeTab === 'templates'
                   ? 'bg-blue-600 text-white shadow-xs font-semibold'
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              <BookOpen className="w-3.5 h-3.5 shrink-0" />
-              <span>Library</span>
+              <BookOpen className="w-3.5 h-3.5" />
+              <span>Library ({PINE_TEMPLATES.length})</span>
             </button>
 
             <button
               onClick={() => setActiveTab('console')}
-              title="Compiler Output & Diagnostics"
-              className={`flex items-center gap-1 px-2 py-1 rounded text-xs font-medium transition-all whitespace-nowrap shrink-0 cursor-pointer ${
+              className={`flex items-center gap-1 px-2.5 py-1 rounded text-xs font-medium transition-all shrink-0 cursor-pointer ${
                 activeTab === 'console'
                   ? 'bg-blue-600 text-white shadow-xs font-semibold'
                   : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
               }`}
             >
-              <Terminal className="w-3.5 h-3.5 shrink-0" />
+              <Terminal className="w-3.5 h-3.5" />
               <span>Console</span>
               {currentResult?.errors && currentResult.errors.length > 0 && (
-                <span className="ml-0.5 px-1.5 py-0.2 rounded text-[10px] bg-rose-500 text-white font-bold leading-none">
+                <span className="ml-0.5 px-1.5 py-0.2 rounded text-[10px] bg-rose-500 text-white font-bold">
                   {currentResult.errors.length}
                 </span>
               )}
@@ -345,27 +387,23 @@ export const PineEditor: React.FC<PineEditorProps> = ({
         </div>
 
         {/* Right: Actions */}
-        <div className="flex items-center gap-1.5 shrink-0 whitespace-nowrap">
-          {/* Active status pill */}
+        <div className="flex items-center gap-1.5 shrink-0">
           {isCompiled && currentResult?.success && (
-            <div
-              title="Script is currently compiled and active on chart"
-              className="flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-500 text-[11px] font-medium border border-emerald-500/20 shrink-0 whitespace-nowrap"
-            >
-              <CheckCircle2 className="w-3.5 h-3.5 shrink-0 text-emerald-500" />
+            <div className="flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-500 text-[11px] font-medium border border-emerald-500/20 shrink-0">
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
               <span>Active</span>
             </div>
           )}
 
           {/* Quick template selector */}
-          <div className="relative shrink-0" title="Select Pine Script Template">
+          <div className="relative shrink-0">
             <select
               value={selectedTemplateId}
               onChange={(e) => {
                 const found = PINE_TEMPLATES.find((t) => t.id === e.target.value);
                 if (found) handleSelectTemplate(found);
               }}
-              className={`text-xs rounded px-2 py-1 border appearance-none pr-6 cursor-pointer font-medium max-w-[130px] sm:max-w-[160px] truncate ${
+              className={`text-xs rounded px-2 py-1 border appearance-none pr-6 cursor-pointer font-medium max-w-[140px] truncate ${
                 isDark
                   ? 'bg-[#131722] border-[#2a2e39] text-[#d1d4dc] hover:border-slate-600'
                   : 'bg-white border-slate-300 text-slate-700 hover:border-slate-400'
@@ -380,9 +418,33 @@ export const PineEditor: React.FC<PineEditorProps> = ({
             <ChevronDown className="w-3 h-3 absolute right-1.5 top-2 pointer-events-none opacity-60" />
           </div>
 
+          <input
+            type="file"
+            ref={fileInputRef}
+            onChange={handleImportScript}
+            accept=".pine,.txt"
+            className="hidden"
+          />
+
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            title="Import script (.pine or .txt)"
+            className="p-1 rounded hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-500 transition-colors shrink-0 cursor-pointer"
+          >
+            <Upload className="w-3.5 h-3.5" />
+          </button>
+
+          <button
+            onClick={handleExportScript}
+            title="Export / Download .pine script"
+            className="p-1 rounded hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-500 transition-colors shrink-0 cursor-pointer"
+          >
+            <Download className="w-3.5 h-3.5" />
+          </button>
+
           <button
             onClick={handleResetCode}
-            title="Reset to Template Default"
+            title="Reset code"
             className="p-1 rounded hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-500 transition-colors shrink-0 cursor-pointer"
           >
             <RotateCcw className="w-3.5 h-3.5" />
@@ -390,18 +452,17 @@ export const PineEditor: React.FC<PineEditorProps> = ({
 
           <button
             onClick={handleSaveScript}
-            title="Save script to local storage (Ctrl+S)"
-            className="flex items-center gap-1 px-2 py-1 rounded border border-slate-300 dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 transition-colors font-medium shrink-0 whitespace-nowrap cursor-pointer"
+            title="Save script locally (Ctrl+S)"
+            className="flex items-center gap-1 px-2 py-1 rounded border border-slate-300 dark:border-slate-700 hover:bg-slate-200 dark:hover:bg-slate-800 text-slate-700 dark:text-slate-300 transition-colors font-medium shrink-0 cursor-pointer"
           >
             <Save className="w-3.5 h-3.5 shrink-0" />
             <span>Save</span>
           </button>
 
-          {/* Add to chart primary button */}
           <button
-            onClick={handleCompileAndApply}
-            title="Compile & Add to Chart (Ctrl+Enter)"
-            className="flex items-center gap-1.5 px-2.5 py-1 rounded bg-blue-600 hover:bg-blue-700 text-white font-medium transition-all shadow-xs active:scale-95 shrink-0 whitespace-nowrap cursor-pointer"
+            onClick={() => handleCompileAndApply()}
+            title="Compile & Apply to Chart (Ctrl+Enter)"
+            className="flex items-center gap-1.5 px-3 py-1 rounded bg-blue-600 hover:bg-blue-700 text-white font-medium transition-all shadow-xs active:scale-95 shrink-0 cursor-pointer"
           >
             <Play className="w-3 h-3 fill-current shrink-0" />
             <span>Add to Chart</span>
@@ -411,7 +472,7 @@ export const PineEditor: React.FC<PineEditorProps> = ({
             <button
               onClick={handleRemoveFromChart}
               title="Remove from chart"
-              className="px-2 py-1 rounded text-rose-500 hover:bg-rose-500/10 border border-rose-500/20 font-medium transition-colors shrink-0 whitespace-nowrap cursor-pointer"
+              className="px-2 py-1 rounded text-rose-500 hover:bg-rose-500/10 border border-rose-500/20 font-medium transition-colors shrink-0 cursor-pointer"
             >
               Remove
             </button>
@@ -422,7 +483,6 @@ export const PineEditor: React.FC<PineEditorProps> = ({
           <button
             onClick={() => setIsMaximized(!isMaximized)}
             className="p-1 rounded hover:bg-slate-200 dark:hover:bg-slate-700 text-slate-500 transition-colors shrink-0 cursor-pointer"
-            title={isMaximized ? 'Restore height' : 'Maximize Pine Editor'}
           >
             {isMaximized ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
           </button>
@@ -430,7 +490,6 @@ export const PineEditor: React.FC<PineEditorProps> = ({
           <button
             onClick={onClose}
             className="p-1 rounded hover:bg-rose-500 hover:text-white text-slate-500 transition-colors shrink-0 cursor-pointer"
-            title="Close Pine Editor"
           >
             <X className="w-4 h-4" />
           </button>
@@ -439,9 +498,9 @@ export const PineEditor: React.FC<PineEditorProps> = ({
 
       {/* Save Success Toast */}
       {saveSuccessNotice && (
-        <div className="absolute top-10 right-4 z-50 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-semibold shadow-lg animate-in fade-in slide-in-from-top-2">
+        <div className="absolute top-12 right-6 z-50 flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 text-white text-xs font-semibold shadow-lg animate-in fade-in">
           <CheckCircle2 className="w-4 h-4" />
-          <span>Pine Script saved to local storage!</span>
+          <span>Pine Script saved!</span>
         </div>
       )}
 
@@ -450,6 +509,61 @@ export const PineEditor: React.FC<PineEditorProps> = ({
         {/* TAB 1: CODE EDITOR */}
         {activeTab === 'editor' && (
           <div className="flex-1 flex flex-col overflow-hidden relative font-mono text-xs">
+            {/* Quick snippet toolbar */}
+            <div className={`flex items-center gap-1.5 px-3 py-1 border-b text-[11px] overflow-x-auto no-scrollbar ${
+              isDark ? 'border-[#2a2e39] bg-[#141822] text-slate-400' : 'border-slate-200 bg-slate-100 text-slate-600'
+            }`}>
+              <span className="font-semibold text-slate-500 select-none mr-1">Insert:</span>
+              <button
+                onClick={() => handleInsertSnippet('ta.sma(close, 14)')}
+                className="px-1.5 py-0.5 rounded bg-slate-500/10 hover:bg-blue-600 hover:text-white cursor-pointer transition-colors"
+              >
+                ta.sma
+              </button>
+              <button
+                onClick={() => handleInsertSnippet('ta.ema(close, 20)')}
+                className="px-1.5 py-0.5 rounded bg-slate-500/10 hover:bg-blue-600 hover:text-white cursor-pointer transition-colors"
+              >
+                ta.ema
+              </button>
+              <button
+                onClick={() => handleInsertSnippet('ta.rsi(close, 14)')}
+                className="px-1.5 py-0.5 rounded bg-slate-500/10 hover:bg-blue-600 hover:text-white cursor-pointer transition-colors"
+              >
+                ta.rsi
+              </button>
+              <button
+                onClick={() => handleInsertSnippet('[macd_line, sig_line, hist] = ta.macd(close, 12, 26, 9)\n')}
+                className="px-1.5 py-0.5 rounded bg-slate-500/10 hover:bg-blue-600 hover:text-white cursor-pointer transition-colors"
+              >
+                ta.macd
+              </button>
+              <button
+                onClick={() => handleInsertSnippet('[st, dir] = ta.supertrend(3, 10)\n')}
+                className="px-1.5 py-0.5 rounded bg-slate-500/10 hover:bg-blue-600 hover:text-white cursor-pointer transition-colors"
+              >
+                ta.supertrend
+              </button>
+              <button
+                onClick={() => handleInsertSnippet('plot(close, "Line", color=color.blue, linewidth=2)\n')}
+                className="px-1.5 py-0.5 rounded bg-slate-500/10 hover:bg-blue-600 hover:text-white cursor-pointer transition-colors"
+              >
+                plot()
+              </button>
+              <button
+                onClick={() => handleInsertSnippet('plotshape(ta.crossover(close, open), "Buy", shape.arrowup, location.belowbar, color.green, text="BUY")\n')}
+                className="px-1.5 py-0.5 rounded bg-slate-500/10 hover:bg-blue-600 hover:text-white cursor-pointer transition-colors"
+              >
+                plotshape()
+              </button>
+              <button
+                onClick={() => handleInsertSnippet('strategy.entry("Long", strategy.long)\n')}
+                className="px-1.5 py-0.5 rounded bg-slate-500/10 hover:bg-blue-600 hover:text-white cursor-pointer transition-colors"
+              >
+                strategy.entry
+              </button>
+            </div>
+
             {/* Error banner if any */}
             {currentResult?.errors && currentResult.errors.length > 0 && (
               <div className="flex items-center gap-2 px-3 py-1.5 bg-rose-500/10 border-b border-rose-500/20 text-rose-500 text-[11px]">
@@ -462,10 +576,8 @@ export const PineEditor: React.FC<PineEditorProps> = ({
             <div className="flex-1 flex overflow-hidden">
               {/* Line Numbers Gutter */}
               <div
-                className={`w-10 select-none py-2 text-right pr-2 font-mono text-[11px] border-r ${
-                  isDark
-                    ? 'bg-[#181c27] text-slate-600 border-[#2a2e39]'
-                    : 'bg-slate-100 text-slate-400 border-slate-200'
+                className={`w-11 select-none py-2 text-right pr-2 font-mono text-[11px] border-r ${
+                  isDark ? 'bg-[#181c27] text-slate-600 border-[#2a2e39]' : 'bg-slate-100 text-slate-400 border-slate-200'
                 }`}
               >
                 {Array.from({ length: lineCount }).map((_, i) => (
@@ -499,7 +611,7 @@ export const PineEditor: React.FC<PineEditorProps> = ({
                       ? 'bg-[#131722] text-[#d1d4dc] selection:bg-blue-600/30'
                       : 'bg-white text-slate-900 selection:bg-blue-100'
                   }`}
-                  placeholder="// Write Pine Script v5 code here..."
+                  placeholder="// Paste or write any TradingView Pine Script v1-v5 here..."
                 />
               </div>
             </div>
@@ -518,40 +630,126 @@ export const PineEditor: React.FC<PineEditorProps> = ({
                 <span>•</span>
                 <span>{lineCount} lines</span>
                 <span>•</span>
-                <span>UTF-8</span>
+                <span>Pine Script v5 Compatible</span>
               </div>
               <div className="flex items-center gap-3">
                 <span className="hidden sm:inline text-slate-500">
                   <kbd className="px-1 py-0.5 rounded bg-slate-700/20 dark:bg-slate-700/50 text-[10px]">Ctrl+Enter</kbd> to execute
                 </span>
                 <span className="text-blue-500 font-medium">
-                  {currentResult?.scriptName || 'Pine Script Engine'}
+                  {currentResult?.scriptName || 'Pine Engine Ready'}
                 </span>
               </div>
             </div>
           </div>
         )}
 
-        {/* TAB 2: STRATEGY TESTER */}
+        {/* TAB 2: DYNAMIC SCRIPT INPUTS */}
+        {activeTab === 'inputs' && (
+          <div className="flex-1 overflow-y-auto p-4 space-y-4">
+            <div className="flex items-center justify-between pb-2 border-b border-slate-700/30">
+              <div>
+                <h4 className="text-sm font-bold">Interactive Script Parameters</h4>
+                <p className="text-xs text-slate-400">
+                  Adjust script inputs live with instant chart updates without modifying Pine code
+                </p>
+              </div>
+              <button
+                onClick={() => handleCompileAndApply()}
+                className="px-3 py-1 rounded bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 transition-colors"
+              >
+                Apply Changes
+              </button>
+            </div>
+
+            {extractedInputs.length > 0 ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {extractedInputs.map((inp) => {
+                  const val = customInputValues[inp.varName] !== undefined ? customInputValues[inp.varName] : inp.defval;
+                  return (
+                    <div
+                      key={inp.id}
+                      className={`p-3 rounded-xl border space-y-2 ${
+                        isDark ? 'bg-[#181c27] border-[#2a2e39]' : 'bg-slate-50 border-slate-200'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs font-semibold text-slate-300">{inp.title}</label>
+                        <span className="text-[10px] font-mono text-slate-500">{inp.varName}</span>
+                      </div>
+
+                      {inp.type === 'bool' ? (
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(val)}
+                            onChange={(e) => handleInputChange(inp.varName, e.target.checked)}
+                            className="w-4 h-4 text-blue-600 rounded cursor-pointer"
+                          />
+                          <span className="text-xs">{val ? 'Enabled' : 'Disabled'}</span>
+                        </div>
+                      ) : inp.type === 'color' ? (
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="color"
+                            value={typeof val === 'string' && val.startsWith('#') ? val : '#3b82f6'}
+                            onChange={(e) => handleInputChange(inp.varName, e.target.value)}
+                            className="w-7 h-7 rounded border-0 cursor-pointer bg-transparent"
+                          />
+                          <span className="text-xs font-mono">{String(val)}</span>
+                        </div>
+                      ) : inp.type === 'int' || inp.type === 'float' ? (
+                        <input
+                          type="number"
+                          value={val}
+                          step={inp.type === 'float' ? '0.1' : '1'}
+                          min={inp.minval}
+                          max={inp.maxval}
+                          onChange={(e) => handleInputChange(inp.varName, parseFloat(e.target.value) || 0)}
+                          className={`w-full text-xs font-mono px-2.5 py-1.5 rounded border ${
+                            isDark
+                              ? 'bg-[#131722] border-[#2a2e39] text-[#d1d4dc]'
+                              : 'bg-white border-slate-300 text-slate-900'
+                          }`}
+                        />
+                      ) : (
+                        <input
+                          type="text"
+                          value={String(val)}
+                          onChange={(e) => handleInputChange(inp.varName, e.target.value)}
+                          className={`w-full text-xs px-2.5 py-1.5 rounded border ${
+                            isDark
+                              ? 'bg-[#131722] border-[#2a2e39] text-[#d1d4dc]'
+                              : 'bg-white border-slate-300 text-slate-900'
+                          }`}
+                        />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="py-12 text-center text-slate-500">
+                <Sliders className="w-10 h-10 mx-auto mb-2 opacity-50" />
+                <p className="text-xs">No <code className="text-blue-500">input()</code> variables detected in the script.</p>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* TAB 3: STRATEGY TESTER */}
         {activeTab === 'strategy-tester' && (
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
             {currentResult?.strategyStats ? (
               <>
-                {/* Metric Summary Cards */}
                 <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-6 gap-2">
                   <div className={`p-2.5 rounded-lg border ${isDark ? 'bg-[#1e222d] border-[#2a2e39]' : 'bg-slate-50 border-slate-200'}`}>
                     <div className="text-[10px] text-slate-400 font-medium uppercase tracking-wider">Net Profit</div>
-                    <div
-                      className={`text-base font-extrabold font-mono mt-0.5 ${
-                        currentResult.strategyStats.netProfit >= 0 ? 'text-emerald-500' : 'text-rose-500'
-                      }`}
-                    >
-                      {currentResult.strategyStats.netProfit >= 0 ? '+' : ''}$
-                      {currentResult.strategyStats.netProfit.toFixed(2)}
+                    <div className={`text-base font-extrabold font-mono mt-0.5 ${currentResult.strategyStats.netProfit >= 0 ? 'text-emerald-500' : 'text-rose-500'}`}>
+                      {currentResult.strategyStats.netProfit >= 0 ? '+' : ''}${currentResult.strategyStats.netProfit.toFixed(2)}
                     </div>
                     <div className="text-[10px] text-slate-400">
-                      {currentResult.strategyStats.netProfitPercent >= 0 ? '+' : ''}
-                      {currentResult.strategyStats.netProfitPercent.toFixed(2)}%
+                      {currentResult.strategyStats.netProfitPercent >= 0 ? '+' : ''}{currentResult.strategyStats.netProfitPercent.toFixed(2)}%
                     </div>
                   </div>
 
@@ -570,7 +768,7 @@ export const PineEditor: React.FC<PineEditorProps> = ({
                     <div className="text-base font-extrabold font-mono text-purple-400 mt-0.5">
                       {currentResult.strategyStats.totalTrades}
                     </div>
-                    <div className="text-[10px] text-slate-400">Chronological</div>
+                    <div className="text-[10px] text-slate-400">Simulated</div>
                   </div>
 
                   <div className={`p-2.5 rounded-lg border ${isDark ? 'bg-[#1e222d] border-[#2a2e39]' : 'bg-slate-50 border-slate-200'}`}>
@@ -578,7 +776,7 @@ export const PineEditor: React.FC<PineEditorProps> = ({
                     <div className="text-base font-extrabold font-mono text-amber-500 mt-0.5">
                       {currentResult.strategyStats.profitFactor.toFixed(2)}
                     </div>
-                    <div className="text-[10px] text-slate-400">Gross Win / Gross Loss</div>
+                    <div className="text-[10px] text-slate-400">Gross Gain/Loss</div>
                   </div>
 
                   <div className={`p-2.5 rounded-lg border ${isDark ? 'bg-[#1e222d] border-[#2a2e39]' : 'bg-slate-50 border-slate-200'}`}>
@@ -597,7 +795,7 @@ export const PineEditor: React.FC<PineEditorProps> = ({
                       ${currentResult.strategyStats.finalEquity.toFixed(2)}
                     </div>
                     <div className="text-[10px] text-slate-400">
-                      Start: ${currentResult.strategyStats.initialCapital}
+                      Initial: ${currentResult.strategyStats.initialCapital}
                     </div>
                   </div>
                 </div>
@@ -606,14 +804,9 @@ export const PineEditor: React.FC<PineEditorProps> = ({
                 <div className="space-y-1.5">
                   <div className="flex items-center justify-between text-xs font-bold text-slate-400">
                     <span>List of Executed Trades ({currentResult.trades?.length || 0})</span>
-                    <span className="text-[11px] font-normal text-slate-500">Simulated on current candle timeframe</span>
                   </div>
 
-                  <div
-                    className={`rounded-lg border overflow-hidden ${
-                      isDark ? 'border-[#2a2e39] bg-[#181c27]' : 'border-slate-200 bg-white'
-                    }`}
-                  >
+                  <div className={`rounded-lg border overflow-hidden ${isDark ? 'border-[#2a2e39] bg-[#181c27]' : 'border-slate-200 bg-white'}`}>
                     <table className="w-full text-left text-xs">
                       <thead className={`text-[11px] font-bold uppercase tracking-wider border-b ${isDark ? 'border-[#2a2e39] bg-[#1e222d] text-slate-400' : 'border-slate-200 bg-slate-50 text-slate-600'}`}>
                         <tr>
@@ -634,21 +827,15 @@ export const PineEditor: React.FC<PineEditorProps> = ({
                               <tr key={trade.id} className="hover:bg-slate-500/5 font-mono text-[11px]">
                                 <td className="py-2 px-3 text-slate-400">#{trade.id}</td>
                                 <td className="py-2 px-3">
-                                  <span
-                                    className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${
-                                      trade.type === 'long'
-                                        ? 'bg-emerald-500/15 text-emerald-500'
-                                        : 'bg-rose-500/15 text-rose-500'
-                                    }`}
-                                  >
+                                  <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                    trade.type === 'long' ? 'bg-emerald-500/15 text-emerald-500' : 'bg-rose-500/15 text-rose-500'
+                                  }`}>
                                     {trade.type === 'long' ? <TrendingUp className="w-3 h-3" /> : <TrendingDown className="w-3 h-3" />}
                                     {trade.type}
                                   </span>
                                 </td>
                                 <td className="py-2 px-3">${trade.entryPrice.toFixed(2)}</td>
-                                <td className="py-2 px-3">
-                                  {trade.exitPrice !== undefined ? `$${trade.exitPrice.toFixed(2)}` : '—'}
-                                </td>
+                                <td className="py-2 px-3">{trade.exitPrice !== undefined ? `$${trade.exitPrice.toFixed(2)}` : '—'}</td>
                                 <td className={`py-2 px-3 font-bold ${isWin ? 'text-emerald-500' : 'text-rose-500'}`}>
                                   {isWin ? '+' : ''}${trade.pnl.toFixed(2)}
                                 </td>
@@ -680,23 +867,14 @@ export const PineEditor: React.FC<PineEditorProps> = ({
                 <BarChart2 className="w-12 h-12 mb-3 text-slate-400 opacity-60" />
                 <h4 className="text-sm font-bold text-slate-700 dark:text-slate-300">No Active Strategy Backtest</h4>
                 <p className="text-xs max-w-sm mt-1 text-slate-400">
-                  Switch to a strategy script (e.g., EMA Cross Strategy or Bollinger Bands Strategy) and click "Add to chart" to run backtests.
+                  Switch to a strategy script (e.g., EMA Golden Cross Strategy or Supertrend Strategy) and click "Add to chart" to run backtests.
                 </p>
-                <button
-                  onClick={() => {
-                    const strat = PINE_TEMPLATES.find((t) => t.type === 'strategy') || PINE_TEMPLATES[0];
-                    handleSelectTemplate(strat);
-                  }}
-                  className="mt-4 px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold hover:bg-blue-700 transition-colors"
-                >
-                  Load EMA Cross Strategy
-                </button>
               </div>
             )}
           </div>
         )}
 
-        {/* TAB 3: PLOTS & SIGNALS */}
+        {/* TAB 4: PLOTS & SIGNALS */}
         {activeTab === 'plots' && (
           <div className="flex-1 overflow-y-auto p-4 space-y-4">
             <div>
@@ -713,10 +891,7 @@ export const PineEditor: React.FC<PineEditorProps> = ({
                       }`}
                     >
                       <div className="flex items-center gap-2">
-                        <div
-                          className="w-3.5 h-3.5 rounded-full border border-white/20 shadow-sm"
-                          style={{ backgroundColor: p.color }}
-                        />
+                        <div className="w-3.5 h-3.5 rounded-full border border-white/20 shadow-sm" style={{ backgroundColor: p.color }} />
                         <div>
                           <div className="text-xs font-bold">{p.title}</div>
                           <div className="text-[10px] text-slate-400 font-mono">
@@ -735,7 +910,6 @@ export const PineEditor: React.FC<PineEditorProps> = ({
               )}
             </div>
 
-            {/* Horizontal Lines */}
             {currentResult?.hlines && currentResult.hlines.length > 0 && (
               <div>
                 <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">
@@ -750,17 +924,13 @@ export const PineEditor: React.FC<PineEditorProps> = ({
                       }`}
                     >
                       <div className="text-xs font-bold font-mono">{hl.title}: ${hl.price}</div>
-                      <div
-                        className="w-3 h-1 rounded"
-                        style={{ backgroundColor: hl.color }}
-                      />
+                      <div className="w-3 h-1 rounded" style={{ backgroundColor: hl.color }} />
                     </div>
                   ))}
                 </div>
               </div>
             )}
 
-            {/* Signal Markers */}
             <div>
               <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">
                 Triggered Signals ({currentResult?.markers?.length || 0})
@@ -774,13 +944,13 @@ export const PineEditor: React.FC<PineEditorProps> = ({
           </div>
         )}
 
-        {/* TAB 4: SCRIPT LIBRARY / TEMPLATES */}
+        {/* TAB 5: TEMPLATES LIBRARY */}
         {activeTab === 'templates' && (
           <div className="flex-1 overflow-y-auto p-4">
             <div className="flex items-center justify-between mb-3">
               <div>
                 <h4 className="text-sm font-bold">Built-in Pine Script Templates</h4>
-                <p className="text-xs text-slate-400">Click any preset to load into the Pine editor and backtest instantly</p>
+                <p className="text-xs text-slate-400">Select any trading script preset to backtest & analyze instantly</p>
               </div>
             </div>
 
@@ -833,7 +1003,7 @@ export const PineEditor: React.FC<PineEditorProps> = ({
           </div>
         )}
 
-        {/* TAB 5: CONSOLE & LOGS */}
+        {/* TAB 6: CONSOLE */}
         {activeTab === 'console' && (
           <div className="flex-1 overflow-y-auto p-3 font-mono text-xs space-y-2">
             <div className="flex items-center justify-between pb-1 border-b border-slate-700/40 text-[11px] text-slate-400">

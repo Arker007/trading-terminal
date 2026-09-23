@@ -3,22 +3,33 @@ import {
   PineCompileError,
   PineExecutionResult,
   PineHLine,
+  PineInputParam,
   PineMarker,
   PinePlot,
+  PinePlotPoint,
   PineStrategyStats,
   PineStrategyTrade,
+  PineFill,
+  PineBgColor,
 } from '../types/pine';
 
 /**
  * Sanitizes and guarantees strictly ascending, deduplicated timestamps and valid numbers for chart rendering.
  */
-export function sanitizePlotData(data: { time: number; value: number }[]): { time: number; value: number }[] {
-  if (!data || data.length === 0) return [];
+export function sanitizePlotData(data: PinePlotPoint[]): PinePlotPoint[] {
+  if (!data || !Array.isArray(data) || data.length === 0) return [];
   const map = new Map<number, number>();
 
   for (let i = 0; i < data.length; i++) {
     const pt = data[i];
-    if (pt && typeof pt.time === 'number' && !isNaN(pt.time) && typeof pt.value === 'number' && !isNaN(pt.value) && isFinite(pt.value)) {
+    if (
+      pt &&
+      typeof pt.time === 'number' &&
+      !isNaN(pt.time) &&
+      typeof pt.value === 'number' &&
+      !isNaN(pt.value) &&
+      isFinite(pt.value)
+    ) {
       map.set(pt.time, pt.value);
     }
   }
@@ -31,6 +42,7 @@ export function sanitizePlotData(data: { time: number; value: number }[]): { tim
  * Splits a string by delimiter only when not inside quotes, parentheses, brackets, or braces.
  */
 export function splitTopLevel(str: string, delimiter: string = ','): string[] {
+  if (!str) return [];
   const result: string[] = [];
   let depth = 0;
   let inQuotes = false;
@@ -95,9 +107,74 @@ export function splitTopLevel(str: string, delimiter: string = ','): string[] {
 }
 
 /**
+ * Splits ternary `cond ? trueVal : falseVal` taking into account nested ternary depth and brackets/quotes.
+ */
+export function splitTernary(expr: string): { cond: string; trueExpr: string; falseExpr: string } | null {
+  if (!expr || !expr.includes('?') || !expr.includes(':')) return null;
+
+  let depth = 0;
+  let inQuotes = false;
+  let quoteChar = '';
+  let firstQIdx = -1;
+  let matchingColonIdx = -1;
+  let ternaryDepth = 0;
+
+  for (let i = 0; i < expr.length; i++) {
+    const ch = expr[i];
+    if (inQuotes) {
+      if (ch === quoteChar && expr[i - 1] !== '\\') {
+        inQuotes = false;
+      }
+    } else {
+      if (ch === '"' || ch === "'") {
+        inQuotes = true;
+        quoteChar = ch;
+      } else if (charIsOpen(ch)) {
+        depth++;
+      } else if (charIsClose(ch)) {
+        depth = Math.max(0, depth - 1);
+      } else if (depth === 0) {
+        if (ch === '?') {
+          if (firstQIdx === -1) {
+            firstQIdx = i;
+          }
+          ternaryDepth++;
+        } else if (ch === ':') {
+          if (firstQIdx !== -1) {
+            ternaryDepth--;
+            if (ternaryDepth === 0) {
+              matchingColonIdx = i;
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  if (firstQIdx !== -1 && matchingColonIdx !== -1 && matchingColonIdx > firstQIdx) {
+    return {
+      cond: expr.substring(0, firstQIdx).trim(),
+      trueExpr: expr.substring(firstQIdx + 1, matchingColonIdx).trim(),
+      falseExpr: expr.substring(matchingColonIdx + 1).trim(),
+    };
+  }
+  return null;
+}
+
+function charIsOpen(ch: string): boolean {
+  return ch === '(' || ch === '[' || ch === '{';
+}
+
+function charIsClose(ch: string): boolean {
+  return ch === ')' || ch === ']' || ch === '}';
+}
+
+/**
  * Parses function call arguments into positional array and named object dictionary.
  */
 export function parseArguments(argsStr: string): { positional: string[]; named: Record<string, string> } {
+  if (!argsStr || !argsStr.trim()) return { positional: [], named: {} };
   const tokens = splitTopLevel(argsStr, ',');
   const positional: string[] = [];
   const named: Record<string, string> = {};
@@ -134,46 +211,47 @@ export function resolvePineColor(colorStr?: string, defaultGreen = true): string
     return colorStr.trim().replace(/['"]/g, '');
   }
 
-  // Handle ternary color expression: cond ? col1 : col2
-  const qIdx = c.indexOf('?');
-  if (qIdx > 0) {
-    const colonParts = splitTopLevel(colorStr, ':');
-    if (colonParts.length === 2) {
-      const qParts = splitTopLevel(colonParts[0], '?');
-      if (qParts.length === 2) {
-        return resolvePineColor(qParts[1], defaultGreen);
-      }
-    }
-  }
-
-  // Handle color.new(color.red, 50)
+  // Handle color.new(color.red, 50) or color.new(#089981, 53)
   if (c.includes('color.new') || c.includes('color.rgb')) {
     const innerMatch = colorStr.match(/(?:color\.new|color\.rgb)\s*\((.*)\)/i);
     if (innerMatch) {
       const parts = splitTopLevel(innerMatch[1], ',');
-      const baseCol = resolvePineColor(parts[0], defaultGreen);
+      const baseRaw = parts[0]?.trim() || '';
+      const transp = parts[1] ? parseFloat(parts[1]) : 0;
+      let baseCol = baseRaw.startsWith('#') ? baseRaw : resolvePineColor(baseRaw, defaultGreen);
+      if (baseCol.startsWith('#') && baseCol.length === 7) {
+        const alpha = Math.max(0.1, Math.min(1, 1 - transp / 100));
+        const r = parseInt(baseCol.slice(1, 3), 16);
+        const g = parseInt(baseCol.slice(3, 5), 16);
+        const b = parseInt(baseCol.slice(5, 7), 16);
+        return `rgba(${r}, ${g}, ${b}, ${alpha.toFixed(2)})`;
+      }
       return baseCol;
     }
   }
 
-  if (c.includes('green') || c.includes('lime')) return '#22c55e';
-  if (c.includes('red') || c.includes('maroon')) return '#ef4444';
-  if (c.includes('blue') || c.includes('navy')) return '#3b82f6';
-  if (c.includes('orange')) return '#f97316';
+  // Named TradingView color constants
+  if (c.includes('green') || c.includes('lime') || c.includes('089981')) return '#22c55e';
+  if (c.includes('red') || c.includes('maroon') || c.includes('f23645')) return '#ef4444';
+  if (c.includes('blue') || c.includes('navy') || c.includes('2962ff')) return '#3b82f6';
+  if (c.includes('orange') || c.includes('ff9800')) return '#f97316';
   if (c.includes('yellow')) return '#eab308';
-  if (c.includes('purple')) return '#a855f7';
+  if (c.includes('purple') || c.includes('e040fb')) return '#a855f7';
   if (c.includes('teal') || c.includes('aqua')) return '#14b8a6';
   if (c.includes('gray') || c.includes('grey') || c.includes('silver')) return '#94a3b8';
   if (c.includes('white')) return '#f8fafc';
   if (c.includes('black')) return '#0f172a';
+  if (c.includes('fuchsia') || c.includes('magenta')) return '#d946ef';
 
   return defaultGreen ? '#22c55e' : '#ef4444';
 }
 
-/**
- * Safe Technical Analysis Calculations
- */
+// ----------------------------------------------------
+// Technical Indicators Library (ta.* and legacy)
+// ----------------------------------------------------
+
 function calcSMA(series: (number | null)[], period: number): (number | null)[] {
+  if (!series || !Array.isArray(series)) return [];
   const result: (number | null)[] = new Array(series.length).fill(null);
   if (period <= 0 || series.length < period) return result;
 
@@ -203,6 +281,7 @@ function calcSMA(series: (number | null)[], period: number): (number | null)[] {
 }
 
 function calcEMA(series: (number | null)[], period: number): (number | null)[] {
+  if (!series || !Array.isArray(series)) return [];
   const result: (number | null)[] = new Array(series.length).fill(null);
   if (period <= 0 || series.length < period) return result;
 
@@ -235,6 +314,7 @@ function calcEMA(series: (number | null)[], period: number): (number | null)[] {
 }
 
 function calcRMA(series: (number | null)[], period: number): (number | null)[] {
+  if (!series || !Array.isArray(series)) return [];
   const result: (number | null)[] = new Array(series.length).fill(null);
   if (period <= 0 || series.length < period) return result;
 
@@ -267,6 +347,7 @@ function calcRMA(series: (number | null)[], period: number): (number | null)[] {
 }
 
 function calcWMA(series: (number | null)[], period: number): (number | null)[] {
+  if (!series || !Array.isArray(series)) return [];
   const result: (number | null)[] = new Array(series.length).fill(null);
   if (period <= 0 || series.length < period) return result;
 
@@ -290,6 +371,7 @@ function calcWMA(series: (number | null)[], period: number): (number | null)[] {
 }
 
 function calcHMA(series: (number | null)[], period: number): (number | null)[] {
+  if (!series || !Array.isArray(series)) return [];
   const halfPeriod = Math.max(1, Math.floor(period / 2));
   const sqrtPeriod = Math.max(1, Math.floor(Math.sqrt(period)));
 
@@ -306,7 +388,78 @@ function calcHMA(series: (number | null)[], period: number): (number | null)[] {
   return calcWMA(diff, sqrtPeriod);
 }
 
+function calcALMA(series: (number | null)[], period: number = 9, offset: number = 0.85, sigma: number = 6): (number | null)[] {
+  if (!series || !Array.isArray(series)) return [];
+  const len = series.length;
+  const result: (number | null)[] = new Array(len).fill(null);
+  if (period <= 0 || len < period) return result;
+
+  const m = offset * (period - 1);
+  const s = period / sigma;
+  const weights: number[] = [];
+  let wSum = 0;
+
+  for (let i = 0; i < period; i++) {
+    const w = Math.exp(-Math.pow(i - m, 2) / (2 * Math.pow(s, 2)));
+    weights.push(w);
+    wSum += w;
+  }
+
+  for (let i = period - 1; i < len; i++) {
+    let sum = 0;
+    let valid = true;
+    for (let j = 0; j < period; j++) {
+      const v = series[i - (period - 1 - j)];
+      if (v === null || isNaN(v)) {
+        valid = false;
+        break;
+      }
+      sum += v * weights[j];
+    }
+    if (valid && wSum !== 0) {
+      result[i] = sum / wSum;
+    }
+  }
+  return result;
+}
+
+function calcLinreg(series: (number | null)[], period: number = 14, offset: number = 0): (number | null)[] {
+  if (!series || !Array.isArray(series)) return [];
+  const len = series.length;
+  const result: (number | null)[] = new Array(len).fill(null);
+  if (period <= 0 || len < period) return result;
+
+  for (let i = period - 1; i < len; i++) {
+    let sumX = 0;
+    let sumY = 0;
+    let sumXY = 0;
+    let sumX2 = 0;
+    let valid = true;
+
+    for (let j = 0; j < period; j++) {
+      const y = series[i - (period - 1 - j)];
+      if (y === null || isNaN(y)) {
+        valid = false;
+        break;
+      }
+      const x = j;
+      sumX += x;
+      sumY += y;
+      sumXY += x * y;
+      sumX2 += x * x;
+    }
+
+    if (valid) {
+      const slope = (period * sumXY - sumX * sumY) / (period * sumX2 - sumX * sumX);
+      const intercept = (sumY - slope * sumX) / period;
+      result[i] = intercept + slope * (period - 1 - offset);
+    }
+  }
+  return result;
+}
+
 function calcRSI(series: (number | null)[], period: number = 14): (number | null)[] {
+  if (!series || !Array.isArray(series)) return [];
   const len = series.length;
   const result: (number | null)[] = new Array(len).fill(null);
   if (len <= period || period <= 0) return result;
@@ -354,7 +507,7 @@ function calcRSI(series: (number | null)[], period: number = 14): (number | null
 }
 
 function calcTR(candles: FormattedCandle[]): number[] {
-  if (!candles || candles.length === 0) return [];
+  if (!candles || !Array.isArray(candles) || candles.length === 0) return [];
   const trs: number[] = [Math.max(0, candles[0].high - candles[0].low)];
   for (let i = 1; i < candles.length; i++) {
     const hl = Math.max(0, candles[i].high - candles[i].low);
@@ -366,6 +519,7 @@ function calcTR(candles: FormattedCandle[]): number[] {
 }
 
 function calcATR(candles: FormattedCandle[], period: number = 14): (number | null)[] {
+  if (!candles || !Array.isArray(candles) || candles.length === 0) return [];
   const result: (number | null)[] = new Array(candles.length).fill(null);
   if (candles.length < period || period <= 0) return result;
 
@@ -380,24 +534,81 @@ function calcATR(candles: FormattedCandle[], period: number = 14): (number | nul
   return result;
 }
 
-function calcSum(series: (number | null)[], period: number): (number | null)[] {
+function calcPivotHigh(
+  series: (number | null)[],
+  leftBars: number = 10,
+  rightBars: number = 10
+): (number | null)[] {
+  if (!series || !Array.isArray(series)) return [];
   const len = series.length;
   const result: (number | null)[] = new Array(len).fill(null);
-  if (period <= 0 || len === 0) return result;
+  if (leftBars <= 0 || rightBars <= 0 || len < leftBars + rightBars + 1) return result;
 
-  for (let i = period - 1; i < len; i++) {
-    let sum = 0;
-    let hasValid = true;
-    for (let j = 0; j < period; j++) {
-      const v = series[i - j];
-      if (v === null || v === undefined || isNaN(v)) {
-        hasValid = false;
+  for (let i = leftBars + rightBars; i < len; i++) {
+    const pIdx = i - rightBars;
+    const pVal = series[pIdx];
+    if (pVal === null || isNaN(pVal)) continue;
+
+    let isPivot = true;
+    for (let j = 1; j <= leftBars; j++) {
+      const leftVal = series[pIdx - j];
+      if (leftVal !== null && leftVal >= pVal) {
+        isPivot = false;
         break;
       }
-      sum += v;
     }
-    if (hasValid) {
-      result[i] = sum;
+    if (isPivot) {
+      for (let j = 1; j <= rightBars; j++) {
+        const rightVal = series[pIdx + j];
+        if (rightVal !== null && rightVal > pVal) {
+          isPivot = false;
+          break;
+        }
+      }
+    }
+
+    if (isPivot) {
+      result[i] = pVal;
+    }
+  }
+  return result;
+}
+
+function calcPivotLow(
+  series: (number | null)[],
+  leftBars: number = 10,
+  rightBars: number = 10
+): (number | null)[] {
+  if (!series || !Array.isArray(series)) return [];
+  const len = series.length;
+  const result: (number | null)[] = new Array(len).fill(null);
+  if (leftBars <= 0 || rightBars <= 0 || len < leftBars + rightBars + 1) return result;
+
+  for (let i = leftBars + rightBars; i < len; i++) {
+    const pIdx = i - rightBars;
+    const pVal = series[pIdx];
+    if (pVal === null || isNaN(pVal)) continue;
+
+    let isPivot = true;
+    for (let j = 1; j <= leftBars; j++) {
+      const leftVal = series[pIdx - j];
+      if (leftVal !== null && leftVal <= pVal) {
+        isPivot = false;
+        break;
+      }
+    }
+    if (isPivot) {
+      for (let j = 1; j <= rightBars; j++) {
+        const rightVal = series[pIdx + j];
+        if (rightVal !== null && rightVal < pVal) {
+          isPivot = false;
+          break;
+        }
+      }
+    }
+
+    if (isPivot) {
+      result[i] = pVal;
     }
   }
   return result;
@@ -408,6 +619,9 @@ function calcBollingerBands(
   period: number = 20,
   mult: number = 2
 ): { upper: (number | null)[]; basis: (number | null)[]; lower: (number | null)[] } {
+  if (!series || !Array.isArray(series)) {
+    return { upper: [], basis: [], lower: [] };
+  }
   const basis = calcSMA(series, period);
   const upper: (number | null)[] = new Array(series.length).fill(null);
   const lower: (number | null)[] = new Array(series.length).fill(null);
@@ -441,6 +655,9 @@ function calcSupertrend(
   factor: number = 3,
   period: number = 10
 ): { supertrend: (number | null)[]; direction: (number | null)[] } {
+  if (!candles || !Array.isArray(candles) || candles.length === 0) {
+    return { supertrend: [], direction: [] };
+  }
   const supertrend: (number | null)[] = new Array(candles.length).fill(null);
   const direction: (number | null)[] = new Array(candles.length).fill(null);
   if (candles.length < period || period <= 0) return { supertrend, direction };
@@ -491,6 +708,9 @@ function calcMACD(
   slowPeriod: number = 26,
   signalPeriod: number = 9
 ): { macd: (number | null)[]; signal: (number | null)[]; hist: (number | null)[] } {
+  if (!series || !Array.isArray(series)) {
+    return { macd: [], signal: [], hist: [] };
+  }
   const fastEMA = calcEMA(series, fastPeriod);
   const slowEMA = calcEMA(series, slowPeriod);
   const len = series.length;
@@ -522,792 +742,248 @@ function calcMACD(
   return { macd, signal, hist };
 }
 
-function calcHighest(series: (number | null)[], period: number): (number | null)[] {
-  const result: (number | null)[] = new Array(series.length).fill(null);
-  if (period <= 0 || series.length === 0) return result;
-
-  for (let i = period - 1; i < series.length; i++) {
-    let max = -Infinity;
-    for (let j = 0; j < period; j++) {
-      const v = series[i - j];
-      if (v !== null && !isNaN(v) && v > max) max = v;
-    }
-    if (max !== -Infinity) result[i] = max;
-  }
-  return result;
-}
-
-function calcLowest(series: (number | null)[], period: number): (number | null)[] {
-  const result: (number | null)[] = new Array(series.length).fill(null);
-  if (period <= 0 || series.length === 0) return result;
-
-  for (let i = period - 1; i < series.length; i++) {
-    let min = Infinity;
-    for (let j = 0; j < period; j++) {
-      const v = series[i - j];
-      if (v !== null && !isNaN(v) && v < min) min = v;
-    }
-    if (min !== Infinity) result[i] = min;
-  }
-  return result;
-}
-
-function calcStochSeries(
-  closeSeries: (number | null)[],
-  highSeries: (number | null)[],
-  lowSeries: (number | null)[],
-  period: number = 14
+function calcSAR(
+  candles: FormattedCandle[],
+  start: number = 0.02,
+  inc: number = 0.02,
+  max: number = 0.2
 ): (number | null)[] {
-  const len = closeSeries.length;
+  if (!candles || !Array.isArray(candles)) return [];
+  const len = candles.length;
   const result: (number | null)[] = new Array(len).fill(null);
-  for (let i = period - 1; i < len; i++) {
-    let h = -Infinity;
-    let l = Infinity;
-    for (let j = 0; j < period; j++) {
-      const hv = highSeries[i - j];
-      const lv = lowSeries[i - j];
-      if (hv !== null && !isNaN(hv) && hv > h) h = hv;
-      if (lv !== null && !isNaN(lv) && lv < l) l = lv;
-    }
-    const c = closeSeries[i];
-    if (c !== null && !isNaN(c) && h !== -Infinity && l !== Infinity) {
-      const diff = h - l;
-      result[i] = diff > 0 ? ((c - l) / diff) * 100 : 50;
-    } else if (c !== null && !isNaN(c)) {
-      result[i] = 50;
-    }
-  }
-  return result;
-}
+  if (len < 2) return result;
 
-function calcCCI(
-  candles: FormattedCandle[],
-  period: number = 20
-): (number | null)[] {
-  const tp = candles.map((c) => (c.high + c.low + c.close) / 3);
-  const sma = calcSMA(tp, period);
-  const result: (number | null)[] = new Array(candles.length).fill(null);
+  let isLong = candles[1].close >= candles[0].close;
+  let af = start;
+  let ep = isLong ? candles[0].high : candles[0].low;
+  let sar = isLong ? candles[0].low : candles[0].high;
 
-  for (let i = period - 1; i < candles.length; i++) {
-    const mean = sma[i];
-    if (mean === null) continue;
-    let meanDev = 0;
-    for (let j = 0; j < period; j++) {
-      meanDev += Math.abs(tp[i - j] - mean);
-    }
-    meanDev /= period;
-    if (meanDev !== 0) {
-      result[i] = (tp[i] - mean) / (0.015 * meanDev);
+  result[0] = sar;
+
+  for (let i = 1; i < len; i++) {
+    const prevSar = sar;
+    sar = prevSar + af * (ep - prevSar);
+
+    if (isLong) {
+      if (candles[i].low < sar) {
+        isLong = false;
+        sar = ep;
+        af = start;
+        ep = candles[i].low;
+      } else {
+        if (candles[i].high > ep) {
+          ep = candles[i].high;
+          af = Math.min(max, af + inc);
+        }
+        if (i >= 1 && sar > candles[i - 1].low) sar = candles[i - 1].low;
+        if (i >= 2 && sar > candles[i - 2].low) sar = candles[i - 2].low;
+      }
     } else {
-      result[i] = 0;
+      if (candles[i].high > sar) {
+        isLong = true;
+        sar = ep;
+        af = start;
+        ep = candles[i].high;
+      } else {
+        if (candles[i].low < ep) {
+          ep = candles[i].low;
+          af = Math.min(max, af + inc);
+        }
+        if (i >= 1 && sar < candles[i - 1].high) sar = candles[i - 1].high;
+        if (i >= 2 && sar < candles[i - 2].high) sar = candles[i - 2].high;
+      }
     }
+
+    result[i] = sar;
   }
+
   return result;
 }
 
 /**
- * Evaluates numeric constant or environment variable
+ * Extracts all `input()` declarations from Pine Script
  */
-function evaluateNumericValue(expr: string, env: Record<string, any>, defaultVal: number): number {
-  const trimmed = expr.trim();
-  if (env[trimmed] !== undefined) {
-    if (typeof env[trimmed] === 'number') {
-      return env[trimmed];
-    }
-    if (typeof env[trimmed] === 'string') {
-      const parsedVar = parseFloat(env[trimmed]);
-      if (!isNaN(parsedVar)) return parsedVar;
-      if (env[trimmed] !== trimmed) {
-        return evaluateNumericValue(env[trimmed], env, defaultVal);
+export function extractPineInputs(code: string): PineInputParam[] {
+  if (!code) return [];
+  const lines = code.split('\n');
+  const inputs: PineInputParam[] = [];
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (line.startsWith('//')) continue;
+
+    const assignMatch = line.match(/^([a-zA-Z0-9_]+)\s*=\s*(?:input(?:\.(?:int|float|bool|string|source|color|timeframe))?)\s*\((.*)\)/i);
+    if (assignMatch) {
+      const varName = assignMatch[1];
+      const argsStr = assignMatch[2];
+      const { positional, named } = parseArguments(argsStr);
+
+      const title = (named.title || (positional[1] && !positional[1].includes('group') ? positional[1] : '') || varName).replace(/['"]/g, '');
+      const rawDefval = named.defval !== undefined ? named.defval : positional[0] !== undefined ? positional[0] : '14';
+      const cleanDef = rawDefval.replace(/['"]/g, '').trim();
+
+      let type: 'int' | 'float' | 'bool' | 'string' | 'source' | 'color' = 'int';
+      let defval: any = cleanDef;
+
+      if (line.includes('input.bool') || cleanDef === 'true' || cleanDef === 'false') {
+        type = 'bool';
+        defval = cleanDef === 'true';
+      } else if (line.includes('input.color') || cleanDef.startsWith('#') || cleanDef.includes('color.')) {
+        type = 'color';
+        defval = resolvePineColor(cleanDef);
+      } else if (line.includes('input.string') || line.includes('input.timeframe') || isNaN(Number(cleanDef))) {
+        type = 'string';
+        defval = cleanDef;
+      } else {
+        const num = parseFloat(cleanDef);
+        if (cleanDef.includes('.') || line.includes('input.float')) {
+          type = 'float';
+          defval = isNaN(num) ? 0.0 : num;
+        } else {
+          type = 'int';
+          defval = isNaN(num) ? 0 : Math.round(num);
+        }
       }
+
+      inputs.push({
+        id: `input-${varName}`,
+        varName,
+        title,
+        type,
+        defval,
+        currentVal: defval,
+        minval: named.minval ? parseFloat(named.minval) : undefined,
+        maxval: named.maxval ? parseFloat(named.maxval) : undefined,
+        step: named.step ? parseFloat(named.step) : undefined,
+        group: named.group?.replace(/['"]/g, ''),
+        tooltip: named.tooltip?.replace(/['"]/g, ''),
+      });
     }
   }
-  const parsed = parseFloat(trimmed);
-  return isNaN(parsed) ? defaultVal : parsed;
+
+  return inputs;
 }
 
 /**
- * Evaluates a Pine Script expression returning a series of numbers
+ * Preprocesses Pine Script code to normalize v1-v5 syntax into standard AST statements
  */
-export function evaluateSeriesExpression(
-  expr: string,
-  env: Record<string, any>,
-  candles: FormattedCandle[],
-  lineNum: number,
-  errors: PineCompileError[]
-): (number | null)[] | null {
-  const trimmed = expr.trim();
-  const len = candles.length;
-  if (!trimmed || len === 0) return null;
+export function preprocessPineScript(code: string): string[] {
+  if (!code) return [];
+  const rawLines = code.split('\n');
+  const statements: string[] = [];
+  let currentStmt = '';
+  let inTypeDefinition = false;
 
-  const closes = candles.map((c) => c.close);
-  const opens = candles.map((c) => c.open);
-  const highs = candles.map((c) => c.high);
-  const lows = candles.map((c) => c.low);
-  const volumes = candles.map((c) => c.volume ?? 0);
-  const hl2 = candles.map((c) => (c.high + c.low) / 2);
-  const hlc3 = candles.map((c) => (c.high + c.low + c.close) / 3);
-  const ohlc4 = candles.map((c) => (c.open + c.high + c.low + c.close) / 4);
-  const hlcc4 = candles.map((c) => (c.high + c.low + 2 * c.close) / 4);
+  for (let i = 0; i < rawLines.length; i++) {
+    let line = rawLines[i];
+    let commentIdx = -1;
+    let inQ = false;
+    let qC = '';
 
-  // 0. na / null handling
-  if (trimmed === 'na' || trimmed === 'null' || trimmed === 'nan' || trimmed === 'undefined') {
-    return new Array(len).fill(null);
-  }
-
-  // 1. Direct variable lookup
-  if (env[trimmed] !== undefined) {
-    if (Array.isArray(env[trimmed])) {
-      return env[trimmed];
-    }
-    if (typeof env[trimmed] === 'number') {
-      return new Array(len).fill(env[trimmed]);
-    }
-    if (typeof env[trimmed] === 'string' && env[trimmed] !== trimmed) {
-      return evaluateSeriesExpression(env[trimmed], env, candles, lineNum, errors);
-    }
-  }
-
-  // 2. Built-in price series
-  if (trimmed === 'close') return closes;
-  if (trimmed === 'open') return opens;
-  if (trimmed === 'high') return highs;
-  if (trimmed === 'low') return lows;
-  if (trimmed === 'volume') return volumes;
-  if (trimmed === 'hl2') return hl2;
-  if (trimmed === 'hlc3') return hlc3;
-  if (trimmed === 'ohlc4') return ohlc4;
-  if (trimmed === 'hlcc4') return hlcc4;
-  if (trimmed === 'bar_index') return Array.from({ length: len }, (_, i) => i);
-  if (trimmed === 'time') return candles.map((c) => c.time);
-
-  // 3. Historical offset: series[1] or var[2]
-  const histMatch = trimmed.match(/^([a-zA-Z0-9_.]+)\s*\[\s*(\d+)\s*\]$/);
-  if (histMatch) {
-    const baseVar = histMatch[1];
-    const offset = parseInt(histMatch[2], 10);
-    const baseSeries = evaluateSeriesExpression(baseVar, env, candles, lineNum, errors);
-    if (baseSeries) {
-      const out: (number | null)[] = new Array(len).fill(null);
-      for (let i = offset; i < len; i++) {
-        out[i] = baseSeries[i - offset];
-      }
-      return out;
-    }
-  }
-
-  // 4. Ternary operator: condition ? exprA : exprB
-  const qIdx = trimmed.indexOf('?');
-  if (qIdx > 0) {
-    const condPart = trimmed.substring(0, qIdx).trim();
-    const rest = trimmed.substring(qIdx + 1);
-    const colonParts = splitTopLevel(rest, ':');
-    if (colonParts.length === 2) {
-      const condSeries = evaluateBooleanExpression(condPart, env, candles, lineNum, errors);
-      const trueSeries = evaluateSeriesExpression(colonParts[0], env, candles, lineNum, errors);
-      const falseSeries = evaluateSeriesExpression(colonParts[1], env, candles, lineNum, errors);
-
-      if (condSeries) {
-        const tSeries = trueSeries || new Array(len).fill(null);
-        const fSeries = falseSeries || new Array(len).fill(null);
-        return condSeries.map((c, i) => (c ? tSeries[i] : fSeries[i]));
-      }
-    }
-  }
-
-  // 5. Function Calls: nz, fixnan, ta.sma, ta.ema, ta.rsi, ta.macd, ta.bb, ta.atr, ta.wma, ta.rma, ta.hma, ta.vwma, ta.highest, ta.lowest, ta.change, ta.mom, ta.stoch, ta.cci, ta.tr, math.*
-  const fnMatch = trimmed.match(/^(?:ta\.|math\.)?([a-zA-Z0-9_]+)\s*\((.*)\)$/i);
-  if (fnMatch) {
-    const fnName = fnMatch[1].toLowerCase();
-    const argsStr = fnMatch[2];
-    const { positional, named } = parseArguments(argsStr);
-
-    // nz(source, replacement)
-    if (fnName === 'nz') {
-      const srcStr = named.source || positional[0] || 'close';
-      const replStr = named.replacement || positional[1] || '0';
-      const src = evaluateSeriesExpression(srcStr, env, candles, lineNum, errors) || new Array(len).fill(null);
-      const repl = evaluateNumericValue(replStr, env, 0);
-      return src.map((v) => (v === null || v === undefined || isNaN(v) ? repl : v));
-    }
-
-    // fixnan(source)
-    if (fnName === 'fixnan') {
-      const srcStr = named.source || positional[0] || 'close';
-      const src = evaluateSeriesExpression(srcStr, env, candles, lineNum, errors) || closes;
-      const out: (number | null)[] = new Array(len).fill(null);
-      let lastValid: number | null = null;
-      for (let i = 0; i < len; i++) {
-        if (src[i] !== null && !isNaN(src[i]!)) {
-          lastValid = src[i];
-        }
-        out[i] = lastValid;
-      }
-      return out;
-    }
-
-    // ta.sma(source, length)
-    if (fnName === 'sma') {
-      let srcStr = named.source || positional[0] || 'close';
-      let lenStr = named.length || positional[1] || '14';
-      if (positional.length === 1 && !isNaN(parseFloat(positional[0]))) {
-        srcStr = 'close';
-        lenStr = positional[0];
-      }
-      const src = evaluateSeriesExpression(srcStr, env, candles, lineNum, errors) || closes;
-      const period = evaluateNumericValue(lenStr, env, 14);
-      return calcSMA(src, period);
-    }
-
-    // ta.ema(source, length)
-    if (fnName === 'ema') {
-      let srcStr = named.source || positional[0] || 'close';
-      let lenStr = named.length || positional[1] || '14';
-      if (positional.length === 1 && !isNaN(parseFloat(positional[0]))) {
-        srcStr = 'close';
-        lenStr = positional[0];
-      }
-      const src = evaluateSeriesExpression(srcStr, env, candles, lineNum, errors) || closes;
-      const period = evaluateNumericValue(lenStr, env, 14);
-      return calcEMA(src, period);
-    }
-
-    // ta.wma(source, length)
-    if (fnName === 'wma') {
-      let srcStr = named.source || positional[0] || 'close';
-      let lenStr = named.length || positional[1] || '14';
-      if (positional.length === 1 && !isNaN(parseFloat(positional[0]))) {
-        srcStr = 'close';
-        lenStr = positional[0];
-      }
-      const src = evaluateSeriesExpression(srcStr, env, candles, lineNum, errors) || closes;
-      const period = evaluateNumericValue(lenStr, env, 14);
-      return calcWMA(src, period);
-    }
-
-    // ta.hma(source, length)
-    if (fnName === 'hma') {
-      let srcStr = named.source || positional[0] || 'close';
-      let lenStr = named.length || positional[1] || '14';
-      if (positional.length === 1 && !isNaN(parseFloat(positional[0]))) {
-        srcStr = 'close';
-        lenStr = positional[0];
-      }
-      const src = evaluateSeriesExpression(srcStr, env, candles, lineNum, errors) || closes;
-      const period = evaluateNumericValue(lenStr, env, 14);
-      return calcHMA(src, period);
-    }
-
-    // ta.rma(source, length)
-    if (fnName === 'rma') {
-      let srcStr = named.source || positional[0] || 'close';
-      let lenStr = named.length || positional[1] || '14';
-      if (positional.length === 1 && !isNaN(parseFloat(positional[0]))) {
-        srcStr = 'close';
-        lenStr = positional[0];
-      }
-      const src = evaluateSeriesExpression(srcStr, env, candles, lineNum, errors) || closes;
-      const period = evaluateNumericValue(lenStr, env, 14);
-      return calcRMA(src, period);
-    }
-
-    // ta.vwma(source, length)
-    if (fnName === 'vwma') {
-      const srcStr = named.source || positional[0] || 'close';
-      const lenStr = named.length || positional[1] || '20';
-      const src = evaluateSeriesExpression(srcStr, env, candles, lineNum, errors) || closes;
-      const period = evaluateNumericValue(lenStr, env, 20);
-      const pv = src.map((p, i) => (p ?? 0) * (volumes[i] ?? 1));
-      const smaPV = calcSMA(pv, period);
-      const smaV = calcSMA(volumes, period);
-      return smaPV.map((val, i) => (val !== null && smaV[i] ? val / smaV[i]! : null));
-    }
-
-    // ta.rsi(source, length) or ta.rsi(length)
-    if (fnName === 'rsi') {
-      let srcStr = named.source || positional[0] || 'close';
-      let lenStr = named.length || positional[1] || '14';
-      if (positional.length === 1 && !isNaN(parseFloat(positional[0]))) {
-        srcStr = 'close';
-        lenStr = positional[0];
-      }
-      const src = evaluateSeriesExpression(srcStr, env, candles, lineNum, errors) || closes;
-      const period = evaluateNumericValue(lenStr, env, 14);
-      return calcRSI(src, period);
-    }
-
-    // ta.atr(length)
-    if (fnName === 'atr') {
-      const lenStr = named.length || positional[0] || '14';
-      const period = evaluateNumericValue(lenStr, env, 14);
-      return calcATR(candles, period);
-    }
-
-    // ta.tr / ta.tr(handle_na)
-    if (fnName === 'tr') {
-      return calcTR(candles);
-    }
-
-    // ta.highest(source, length) or ta.highest(length)
-    if (fnName === 'highest') {
-      let srcStr = 'high';
-      let lenStr = '14';
-      if (positional.length === 1 && !isNaN(parseFloat(positional[0]))) {
-        lenStr = positional[0];
-      } else if (positional.length >= 2) {
-        srcStr = positional[0];
-        lenStr = positional[1];
-      }
-      if (named.source) srcStr = named.source;
-      if (named.length) lenStr = named.length;
-      const src = evaluateSeriesExpression(srcStr, env, candles, lineNum, errors) || highs;
-      const period = evaluateNumericValue(lenStr, env, 14);
-      return calcHighest(src, period);
-    }
-
-    // ta.lowest(source, length) or ta.lowest(length)
-    if (fnName === 'lowest') {
-      let srcStr = 'low';
-      let lenStr = '14';
-      if (positional.length === 1 && !isNaN(parseFloat(positional[0]))) {
-        lenStr = positional[0];
-      } else if (positional.length >= 2) {
-        srcStr = positional[0];
-        lenStr = positional[1];
-      }
-      if (named.source) srcStr = named.source;
-      if (named.length) lenStr = named.length;
-      const src = evaluateSeriesExpression(srcStr, env, candles, lineNum, errors) || lows;
-      const period = evaluateNumericValue(lenStr, env, 14);
-      return calcLowest(src, period);
-    }
-
-    // ta.change(source, length) / ta.mom(source, length)
-    if (fnName === 'change' || fnName === 'mom') {
-      let srcStr = named.source || positional[0] || 'close';
-      let lenStr = named.length || positional[1] || '1';
-      if (positional.length === 1 && !isNaN(parseFloat(positional[0]))) {
-        srcStr = 'close';
-        lenStr = positional[0];
-      }
-      const src = evaluateSeriesExpression(srcStr, env, candles, lineNum, errors) || closes;
-      const period = evaluateNumericValue(lenStr, env, 1);
-      const out: (number | null)[] = new Array(len).fill(null);
-      for (let i = period; i < len; i++) {
-        if (src[i] !== null && src[i - period] !== null) {
-          out[i] = src[i]! - src[i - period]!;
-        }
-      }
-      return out;
-    }
-
-    // ta.stoch(source, high, low, length)
-    if (fnName === 'stoch') {
-      let src1Str = named.source || positional[0] || 'close';
-      let src2Str = named.high || positional[1] || 'high';
-      let src3Str = named.low || positional[2] || 'low';
-      let lenStr = named.length || positional[3] || positional[1] || '14';
-
-      if (!isNaN(parseFloat(positional[0])) && positional.length < 4) {
-        src1Str = 'close';
-        src2Str = 'high';
-        src3Str = 'low';
-        lenStr = positional[0];
-      }
-
-      const sClose = evaluateSeriesExpression(src1Str, env, candles, lineNum, errors) || closes;
-      const sHigh = evaluateSeriesExpression(src2Str, env, candles, lineNum, errors) || highs;
-      const sLow = evaluateSeriesExpression(src3Str, env, candles, lineNum, errors) || lows;
-      const period = evaluateNumericValue(lenStr, env, 14);
-
-      return calcStochSeries(sClose, sHigh, sLow, period);
-    }
-
-    // ta.cci(source, length)
-    if (fnName === 'cci') {
-      let srcStr = named.source || positional[0] || 'close';
-      let lenStr = named.length || positional[1] || '20';
-      if (positional.length === 1 && !isNaN(parseFloat(positional[0]))) {
-        srcStr = 'close';
-        lenStr = positional[0];
-      }
-      const period = evaluateNumericValue(lenStr, env, 20);
-      return calcCCI(candles, period);
-    }
-
-    // math.abs, math.max, math.min, math.sqrt, math.round, math.floor, math.ceil, math.pow, math.sign
-    if (['abs', 'max', 'min', 'sqrt', 'pow', 'round', 'floor', 'ceil', 'sign', 'avg'].includes(fnName)) {
-      const arg1 = evaluateSeriesExpression(positional[0] || '0', env, candles, lineNum, errors) || new Array(len).fill(0);
-      const arg2 = positional[1]
-        ? evaluateSeriesExpression(positional[1], env, candles, lineNum, errors) || new Array(len).fill(0)
-        : null;
-
-      const out: (number | null)[] = new Array(len).fill(null);
-      for (let i = 0; i < len; i++) {
-        const v1 = arg1[i];
-        const v2 = arg2 ? arg2[i] : 0;
-        if (v1 === null) continue;
-        if (fnName === 'abs') out[i] = Math.abs(v1);
-        else if (fnName === 'sqrt') out[i] = v1 >= 0 ? Math.sqrt(v1) : null;
-        else if (fnName === 'round') out[i] = Math.round(v1);
-        else if (fnName === 'floor') out[i] = Math.floor(v1);
-        else if (fnName === 'ceil') out[i] = Math.ceil(v1);
-        else if (fnName === 'sign') out[i] = Math.sign(v1);
-        else if (fnName === 'max' && v2 !== null) out[i] = Math.max(v1, v2);
-        else if (fnName === 'min' && v2 !== null) out[i] = Math.min(v1, v2);
-        else if (fnName === 'pow' && v2 !== null) out[i] = Math.pow(v1, v2);
-        else if (fnName === 'avg' && v2 !== null) out[i] = (v1 + v2) / 2;
-      }
-      return out;
-    }
-
-    // math.sum(source, length) or ta.sum(source, length) or sum(source, length)
-    if (fnName === 'sum') {
-      let srcStr = named.source || positional[0] || 'close';
-      let lenStr = named.length || positional[1] || '14';
-      if (positional.length === 1 && !isNaN(parseFloat(positional[0]))) {
-        srcStr = 'close';
-        lenStr = positional[0];
-      }
-      const src = evaluateSeriesExpression(srcStr, env, candles, lineNum, errors) || closes;
-      const period = evaluateNumericValue(lenStr, env, 14);
-      return calcSum(src, period);
-    }
-  }
-
-  // 6. Binary arithmetic with proper precedence:
-  // First evaluate Addition / Subtraction
-  const topTokensPlusMinus = splitTopLevel(trimmed, '+');
-  if (topTokensPlusMinus.length > 1) {
-    let acc = evaluateSeriesExpression(topTokensPlusMinus[0], env, candles, lineNum, errors);
-    if (!acc) acc = new Array(len).fill(parseFloat(topTokensPlusMinus[0]) || 0);
-
-    for (let p = 1; p < topTokensPlusMinus.length; p++) {
-      const next = evaluateSeriesExpression(topTokensPlusMinus[p], env, candles, lineNum, errors) || new Array(len).fill(parseFloat(topTokensPlusMinus[p]) || 0);
-      acc = acc.map((v, i) => (v !== null && next[i] !== null ? v + next[i]! : null));
-    }
-    return acc;
-  }
-
-  const topTokensMinus = splitTopLevel(trimmed, '-');
-  if (topTokensMinus.length > 1 && topTokensMinus[0] !== '') {
-    let acc = evaluateSeriesExpression(topTokensMinus[0], env, candles, lineNum, errors);
-    if (!acc) acc = new Array(len).fill(parseFloat(topTokensMinus[0]) || 0);
-
-    for (let p = 1; p < topTokensMinus.length; p++) {
-      const next = evaluateSeriesExpression(topTokensMinus[p], env, candles, lineNum, errors) || new Array(len).fill(parseFloat(topTokensMinus[p]) || 0);
-      acc = acc.map((v, i) => (v !== null && next[i] !== null ? v - next[i]! : null));
-    }
-    return acc;
-  }
-
-  const topTokensMul = splitTopLevel(trimmed, '*');
-  if (topTokensMul.length > 1) {
-    let acc = evaluateSeriesExpression(topTokensMul[0], env, candles, lineNum, errors);
-    if (!acc) acc = new Array(len).fill(parseFloat(topTokensMul[0]) || 0);
-
-    for (let p = 1; p < topTokensMul.length; p++) {
-      const next = evaluateSeriesExpression(topTokensMul[p], env, candles, lineNum, errors) || new Array(len).fill(parseFloat(topTokensMul[p]) || 0);
-      acc = acc.map((v, i) => (v !== null && next[i] !== null ? v * next[i]! : null));
-    }
-    return acc;
-  }
-
-  const topTokensDiv = splitTopLevel(trimmed, '/');
-  if (topTokensDiv.length > 1) {
-    let acc = evaluateSeriesExpression(topTokensDiv[0], env, candles, lineNum, errors);
-    if (!acc) acc = new Array(len).fill(parseFloat(topTokensDiv[0]) || 0);
-
-    for (let p = 1; p < topTokensDiv.length; p++) {
-      const next = evaluateSeriesExpression(topTokensDiv[p], env, candles, lineNum, errors) || new Array(len).fill(parseFloat(topTokensDiv[p]) || 0);
-      acc = acc.map((v, i) => (v !== null && next[i] !== null && next[i] !== 0 ? v / next[i]! : null));
-    }
-    return acc;
-  }
-
-  // 7. Strip surrounding parentheses: (expression)
-  if (trimmed.startsWith('(') && trimmed.endsWith(')')) {
-    return evaluateSeriesExpression(trimmed.substring(1, trimmed.length - 1), env, candles, lineNum, errors);
-  }
-
-  // 8. Static numeric constant
-  const num = parseFloat(trimmed);
-  if (!isNaN(num)) {
-    return new Array(len).fill(num);
-  }
-
-  return null;
-}
-
-/**
- * Evaluates boolean condition series (ta.crossover, ta.crossunder, >, <, >=, <=, ==, and, or, not)
- */
-export function evaluateBooleanExpression(
-  expr: string,
-  env: Record<string, any>,
-  candles: FormattedCandle[],
-  lineNum: number,
-  errors: PineCompileError[]
-): boolean[] | null {
-  const trimmed = expr.trim();
-  const len = candles.length;
-  if (!trimmed || len === 0) return null;
-  const closes = candles.map((c) => c.close);
-
-  // 1. Direct variable lookup
-  if (env[trimmed] !== undefined) {
-    const val = env[trimmed];
-    if (Array.isArray(val)) {
-      const isBool = val.some((v: any) => typeof v === 'boolean');
-      if (isBool) {
-        return val.map((v: any) => Boolean(v));
-      }
-      return val.map((v: any) => v !== null && v !== undefined && !isNaN(v) && v !== 0);
-    }
-    if (typeof val === 'boolean') {
-      return new Array(len).fill(val);
-    }
-    if (typeof val === 'string') {
-      const lower = val.toLowerCase().trim();
-      if (lower === 'true' || lower === '1') return new Array(len).fill(true);
-      if (lower === 'false' || lower === '0') return new Array(len).fill(false);
-    }
-    if (typeof val === 'number') {
-      return new Array(len).fill(!isNaN(val) && val !== 0);
-    }
-  }
-
-  // 1a. Direct boolean literals
-  if (trimmed === 'true') return new Array(len).fill(true);
-  if (trimmed === 'false') return new Array(len).fill(false);
-
-  // 1a1. String equality comparison (e.g. timeframe.period == "5S" or timeframe.period == "1")
-  if (trimmed.includes('==') || trimmed.includes('!=')) {
-    const isEq = trimmed.includes('==');
-    const op = isEq ? '==' : '!=';
-    const parts = splitTopLevel(trimmed, op);
-    if (parts.length === 2) {
-      const left = parts[0].trim();
-      const right = parts[1].trim();
-      const leftIsStr = left.startsWith('"') || left.startsWith("'") || typeof env[left] === 'string';
-      const rightIsStr = right.startsWith('"') || right.startsWith("'") || typeof env[right] === 'string';
-      if (leftIsStr || rightIsStr) {
-        const leftVal = env[left] !== undefined ? String(env[left]) : left.replace(/['"]/g, '');
-        const rightVal = env[right] !== undefined ? String(env[right]) : right.replace(/['"]/g, '');
-        const match = isEq ? leftVal === rightVal : leftVal !== rightVal;
-        return new Array(len).fill(match);
-      }
-    }
-  }
-
-  // 1a. ta.na(x) or na(x)
-  const naMatch = trimmed.match(/^(?:ta\.)?na\s*\((.*)\)$/i);
-  if (naMatch) {
-    const argStr = naMatch[1].trim();
-    const series = evaluateSeriesExpression(argStr, env, candles, lineNum, errors);
-    const out: boolean[] = new Array(len).fill(true);
-    if (series) {
-      for (let i = 0; i < len; i++) {
-        out[i] = series[i] === null || series[i] === undefined || isNaN(series[i]!);
-      }
-    }
-    return out;
-  }
-
-  // 1b. ta.rising(source, length)
-  const risingMatch = trimmed.match(/^(?:ta\.)?rising\s*\((.*)\)$/i);
-  if (risingMatch) {
-    const { positional, named } = parseArguments(risingMatch[1]);
-    const src = evaluateSeriesExpression(named.source || positional[0] || 'close', env, candles, lineNum, errors) || closes;
-    const period = evaluateNumericValue(named.length || positional[1] || '1', env, 1);
-    const out: boolean[] = new Array(len).fill(false);
-    for (let i = period; i < len; i++) {
-      let isRising = true;
-      for (let j = 0; j < period; j++) {
-        if (src[i - j] === null || src[i - j - 1] === null || src[i - j]! <= src[i - j - 1]!) {
-          isRising = false;
+    for (let cIdx = 0; cIdx < line.length - 1; cIdx++) {
+      const ch = line[cIdx];
+      if (inQ) {
+        if (ch === qC && line[cIdx - 1] !== '\\') inQ = false;
+      } else {
+        if (ch === '"' || ch === "'") {
+          inQ = true;
+          qC = ch;
+        } else if (ch === '/' && line[cIdx + 1] === '/') {
+          commentIdx = cIdx;
           break;
         }
       }
-      out[i] = isRising;
     }
-    return out;
-  }
 
-  // 1c. ta.falling(source, length)
-  const fallingMatch = trimmed.match(/^(?:ta\.)?falling\s*\((.*)\)$/i);
-  if (fallingMatch) {
-    const { positional, named } = parseArguments(fallingMatch[1]);
-    const src = evaluateSeriesExpression(named.source || positional[0] || 'close', env, candles, lineNum, errors) || closes;
-    const period = evaluateNumericValue(named.length || positional[1] || '1', env, 1);
-    const out: boolean[] = new Array(len).fill(false);
-    for (let i = period; i < len; i++) {
-      let isFalling = true;
-      for (let j = 0; j < period; j++) {
-        if (src[i - j] === null || src[i - j - 1] === null || src[i - j]! >= src[i - j - 1]!) {
-          isFalling = false;
-          break;
-        }
-      }
-      out[i] = isFalling;
+    if (commentIdx !== -1) {
+      line = line.substring(0, commentIdx);
     }
-    return out;
-  }
 
-  // 1d. ta.cross(a, b)
-  const crossMatch = trimmed.match(/^(?:ta\.)?cross\s*\((.*)\)$/i);
-  if (crossMatch && !crossMatch[0].toLowerCase().includes('crossover') && !crossMatch[0].toLowerCase().includes('crossunder')) {
-    const { positional, named } = parseArguments(crossMatch[1]);
-    const src1 = named.source1 || positional[0] || 'close';
-    const src2 = named.source2 || positional[1] || 'open';
-    const a = evaluateSeriesExpression(src1, env, candles, lineNum, errors) || closes;
-    const b = evaluateSeriesExpression(src2, env, candles, lineNum, errors) || new Array(len).fill(parseFloat(src2) || 0);
+    const trimmed = line.trim();
+    if (!trimmed) continue;
 
-    const out: boolean[] = new Array(len).fill(false);
-    for (let i = 1; i < len; i++) {
-      const prevA = a[i - 1];
-      const prevB = b[i - 1];
-      const currA = a[i];
-      const currB = b[i];
-      if (prevA !== null && prevB !== null && currA !== null && currB !== null) {
-        out[i] = (prevA <= prevB && currA > currB) || (prevA >= prevB && currA < currB);
+    // Skip custom user-defined type definitions cleanly
+    if (trimmed.startsWith('type ')) {
+      inTypeDefinition = true;
+      continue;
+    }
+    if (inTypeDefinition) {
+      if (/^\s{2,}/.test(line) || /^(float|int|bool|string|box|line|label)\s+/i.test(trimmed)) {
+        continue;
+      } else {
+        inTypeDefinition = false;
       }
     }
-    return out;
-  }
 
-  // 2. Logical "or"
-  const orParts = splitTopLevel(trimmed, 'or');
-  if (orParts.length > 1) {
-    let acc = evaluateBooleanExpression(orParts[0], env, candles, lineNum, errors);
-    for (let i = 1; i < orParts.length; i++) {
-      const next = evaluateBooleanExpression(orParts[i], env, candles, lineNum, errors);
-      if (acc && next) {
-        acc = acc.map((v, idx) => v || next[idx]);
+    // Normalizing legacy v1-v4 aliases to modern v5 syntax
+    const normalized = trimmed
+      .replace(/\bstudy\s*\(/g, 'indicator(')
+      .replace(/\biff\s*\(/g, 'ta.iff(')
+      .replace(/\bsma\s*\(/g, 'ta.sma(')
+      .replace(/\bema\s*\(/g, 'ta.ema(')
+      .replace(/\bwma\s*\(/g, 'ta.wma(')
+      .replace(/\brma\s*\(/g, 'ta.rma(')
+      .replace(/\bhma\s*\(/g, 'ta.hma(')
+      .replace(/\brsi\s*\(/g, 'ta.rsi(')
+      .replace(/\bmacd\s*\(/g, 'ta.macd(')
+      .replace(/\blowest\s*\(/g, 'ta.lowest(')
+      .replace(/\bhighest\s*\(/g, 'ta.highest(')
+      .replace(/\batr\s*\(/g, 'ta.atr(')
+      .replace(/\bpivothigh\s*\(/g, 'ta.pivothigh(')
+      .replace(/\bpivotlow\s*\(/g, 'ta.pivotlow(')
+      .replace(/\bcrossover\s*\(/g, 'ta.crossover(')
+      .replace(/\bcrossunder\s*\(/g, 'ta.crossunder(')
+      .replace(/\bcross\s*\(/g, 'ta.cross(')
+      .replace(/\bsupertrend\s*\(/g, 'ta.supertrend(')
+      .replace(/\bvaluewhen\s*\(/g, 'ta.valuewhen(')
+      .replace(/\bbarssince\s*\(/g, 'ta.barssince(')
+      .replace(/\bchange\s*\(/g, 'ta.change(')
+      .replace(/\bstoch\s*\(/g, 'ta.stoch(')
+      .replace(/\bcci\s*\(/g, 'ta.cci(');
+
+    const isContinuation =
+      currentStmt !== '' &&
+      (/(?:[,+\-*\/?:=]|and|or)\s*$/i.test(currentStmt) || /^(?:[,+\-*\/?:=]|and|or)\s*/i.test(normalized));
+
+    if (isContinuation) {
+      currentStmt += ' ' + normalized;
+    } else {
+      if (currentStmt) {
+        statements.push(currentStmt);
       }
-    }
-    if (acc) return acc;
-  }
-
-  // 3. Logical "and"
-  const andParts = splitTopLevel(trimmed, 'and');
-  if (andParts.length > 1) {
-    let acc = evaluateBooleanExpression(andParts[0], env, candles, lineNum, errors);
-    for (let i = 1; i < andParts.length; i++) {
-      const next = evaluateBooleanExpression(andParts[i], env, candles, lineNum, errors);
-      if (acc && next) {
-        acc = acc.map((v, idx) => v && next[idx]);
-      }
-    }
-    if (acc) return acc;
-  }
-
-  // 4. Logical "not"
-  if (trimmed.startsWith('not ')) {
-    const sub = evaluateBooleanExpression(trimmed.substring(4), env, candles, lineNum, errors);
-    if (sub) {
-      return sub.map((v) => !v);
+      currentStmt = normalized;
     }
   }
 
-  // 5. ta.crossover(a, b)
-  const crossOverMatch = trimmed.match(/^(?:ta\.)?crossover\s*\((.*)\)$/i);
-  if (crossOverMatch) {
-    const { positional, named } = parseArguments(crossOverMatch[1]);
-    const src1 = named.source1 || positional[0] || 'close';
-    const src2 = named.source2 || positional[1] || 'open';
-    const a = evaluateSeriesExpression(src1, env, candles, lineNum, errors) || closes;
-    const b = evaluateSeriesExpression(src2, env, candles, lineNum, errors) || new Array(len).fill(parseFloat(src2) || 0);
-
-    const out: boolean[] = new Array(len).fill(false);
-    for (let i = 1; i < len; i++) {
-      const prevA = a[i - 1];
-      const prevB = b[i - 1];
-      const currA = a[i];
-      const currB = b[i];
-      if (prevA !== null && prevB !== null && currA !== null && currB !== null) {
-        out[i] = prevA <= prevB && currA > currB;
-      }
-    }
-    return out;
+  if (currentStmt) {
+    statements.push(currentStmt);
   }
 
-  // 6. ta.crossunder(a, b)
-  const crossUnderMatch = trimmed.match(/^(?:ta\.)?crossunder\s*\((.*)\)$/i);
-  if (crossUnderMatch) {
-    const { positional, named } = parseArguments(crossUnderMatch[1]);
-    const src1 = named.source1 || positional[0] || 'close';
-    const src2 = named.source2 || positional[1] || 'open';
-    const a = evaluateSeriesExpression(src1, env, candles, lineNum, errors) || closes;
-    const b = evaluateSeriesExpression(src2, env, candles, lineNum, errors) || new Array(len).fill(parseFloat(src2) || 0);
-
-    const out: boolean[] = new Array(len).fill(false);
-    for (let i = 1; i < len; i++) {
-      const prevA = a[i - 1];
-      const prevB = b[i - 1];
-      const currA = a[i];
-      const currB = b[i];
-      if (prevA !== null && prevB !== null && currA !== null && currB !== null) {
-        out[i] = prevA >= prevB && currA < currB;
-      }
-    }
-    return out;
-  }
-
-  // 7. Comparison operators: >=, <=, ==, !=, >, <
-  const compOps = ['>=', '<=', '==', '!=', '>', '<'];
-  for (const op of compOps) {
-    const opIdx = trimmed.indexOf(op);
-    if (opIdx > 0) {
-      const leftStr = trimmed.substring(0, opIdx).trim();
-      const rightStr = trimmed.substring(opIdx + op.length).trim();
-      const a = evaluateSeriesExpression(leftStr, env, candles, lineNum, errors) || new Array(len).fill(parseFloat(leftStr) || 0);
-      const b = evaluateSeriesExpression(rightStr, env, candles, lineNum, errors) || new Array(len).fill(parseFloat(rightStr) || 0);
-
-      const out: boolean[] = new Array(len).fill(false);
-      for (let i = 0; i < len; i++) {
-        const aVal = a[i];
-        const bVal = b[i];
-        if (aVal === null || bVal === null) continue;
-
-        if (op === '>') out[i] = aVal > bVal;
-        else if (op === '<') out[i] = aVal < bVal;
-        else if (op === '>=') out[i] = aVal >= bVal;
-        else if (op === '<=') out[i] = aVal <= bVal;
-        else if (op === '==') out[i] = Math.abs(aVal - bVal) < 1e-9;
-        else if (op === '!=') out[i] = Math.abs(aVal - bVal) >= 1e-9;
-      }
-      return out;
-    }
-  }
-
-  // 8. Strip surrounding parentheses: (condition)
-  if (trimmed.startsWith('(') && trimmed.endsWith(')')) {
-    return evaluateBooleanExpression(trimmed.substring(1, trimmed.length - 1), env, candles, lineNum, errors);
-  }
-
-  return null;
+  return statements;
 }
 
 /**
- * Executes Pine Script v5 code against historical candles safely
+ * Main Pine Script Execution Engine
  */
 export function executePineScript(
-  scriptCode: string,
+  code: string,
   candles: FormattedCandle[],
-  timeframeSeconds: number = 60
+  timeframeSeconds: number = 60,
+  customInputOverrides: Record<string, any> = {}
 ): PineExecutionResult {
   const startTime = performance.now();
   const errors: PineCompileError[] = [];
   const logs: string[] = [];
   const plots: PinePlot[] = [];
   const hlines: PineHLine[] = [];
+  const fills: PineFill[] = [];
+  const bgcolors: PineBgColor[] = [];
   const markers: PineMarker[] = [];
   const trades: PineStrategyTrade[] = [];
 
   const defaultResult: PineExecutionResult = {
     success: false,
-    scriptName: 'Custom Pine Script',
+    scriptName: 'Pine Script',
     scriptType: 'indicator',
     isOverlay: true,
     timeframe: timeframeSeconds,
@@ -1319,98 +995,51 @@ export function executePineScript(
     executionTimeMs: 0,
   };
 
-  if (!candles || candles.length === 0) {
-    errors.push({ line: 1, message: 'No market candles available for script execution' });
-    return { ...defaultResult, errors };
-  }
-
-  if (!scriptCode || !scriptCode.trim()) {
-    errors.push({ line: 1, message: 'Pine Script source code is empty' });
+  if (!candles || !Array.isArray(candles) || candles.length === 0) {
+    errors.push({ line: 1, message: 'Market candle history is required for script execution.' });
     return { ...defaultResult, errors };
   }
 
   try {
     const len = candles.length;
-    const times = candles.map((c) => c.time);
-    const closes = candles.map((c) => c.close);
-    const highs = candles.map((c) => c.high);
-    const lows = candles.map((c) => c.low);
-    const env: Record<string, any> = {};
+    const times = candles.map((c) => c?.time ?? 0);
+    const opens = candles.map((c) => c?.open ?? 0);
+    const highs = candles.map((c) => c?.high ?? 0);
+    const lows = candles.map((c) => c?.low ?? 0);
+    const closes = candles.map((c) => c?.close ?? 0);
+    const volumes = candles.map((c) => c?.volume ?? 1);
+    const hl2 = candles.map((c) => ((c?.high ?? 0) + (c?.low ?? 0)) / 2);
+    const hlc3 = candles.map((c) => ((c?.high ?? 0) + (c?.low ?? 0) + (c?.close ?? 0)) / 3);
+    const ohlc4 = candles.map((c) => ((c?.open ?? 0) + (c?.high ?? 0) + (c?.low ?? 0) + (c?.close ?? 0)) / 4);
 
-    // Determine standard Pine Script timeframe identifiers
-    const tfPeriod =
-      timeframeSeconds === 5 ? '5S' :
-      timeframeSeconds === 15 ? '15S' :
-      timeframeSeconds === 30 ? '30S' :
-      timeframeSeconds === 60 ? '1' :
-      timeframeSeconds === 300 ? '5' :
-      timeframeSeconds === 900 ? '15' :
-      timeframeSeconds === 3600 ? '60' :
-      timeframeSeconds === 14400 ? '240' :
-      timeframeSeconds === 86400 ? 'D' :
-      `${Math.max(1, Math.round(timeframeSeconds / 60))}`;
-
-    const tfMultiplier =
-      timeframeSeconds < 60
-        ? timeframeSeconds
-        : timeframeSeconds < 86400
-        ? Math.max(1, Math.round(timeframeSeconds / 60))
-        : Math.max(1, Math.round(timeframeSeconds / 86400));
-
-    // Initial default environment values
-    env.close = closes;
-    env.open = candles.map((c) => c.open);
-    env.high = highs;
-    env.low = lows;
-    env.volume = candles.map((c) => c.volume ?? 0);
-    env.hl2 = candles.map((c) => (c.high + c.low) / 2);
-    env.hlc3 = candles.map((c) => (c.high + c.low + c.close) / 3);
-    env.ohlc4 = candles.map((c) => (c.open + c.high + c.low + c.close) / 4);
-    env.hlcc4 = candles.map((c) => (c.high + c.low + 2 * c.close) / 4);
-    env.bar_index = Array.from({ length: len }, (_, i) => i);
-    env.last_bar_index = len - 1;
-    env.time = times;
-    env.na = null;
-
-    // Timeframe built-in variables
-    env['timeframe.period'] = tfPeriod;
-    env['timeframe.multiplier'] = tfMultiplier;
-    env['timeframe.isseconds'] = timeframeSeconds < 60;
-    env['timeframe.isminutes'] = timeframeSeconds >= 60 && timeframeSeconds < 86400;
-    env['timeframe.isintraday'] = timeframeSeconds < 86400;
-    env['timeframe.isdaily'] = timeframeSeconds >= 86400;
-    env['period'] = tfPeriod;
-    env['interval'] = tfMultiplier;
-
-    // Symbol & Barstate info
-    env['syminfo.tickerid'] = 'BINOMO:CRYPTO_IDX';
-    env['syminfo.mintick'] = 0.01;
-    env['syminfo.pointvalue'] = 1;
-
-    env['barstate.isconfirmed'] = true;
-    env['barstate.isfirst'] = false;
-    env['barstate.islast'] = true;
-    env['barstate.isnew'] = false;
-
-    env['location.absolute'] = 'absolute';
-    env['location.belowbar'] = 'belowBar';
-    env['location.abovebar'] = 'aboveBar';
-    env['shape.labelup'] = 'arrowUp';
-    env['shape.labeldown'] = 'arrowDown';
-    env['shape.triangleup'] = 'arrowUp';
-    env['shape.triangledown'] = 'arrowDown';
-    env['shape.circle'] = 'circle';
-    env['shape.square'] = 'square';
-    env['size.small'] = 'small';
-    env['size.normal'] = 'normal';
-    env['color.green'] = '#22c55e';
-    env['color.red'] = '#ef4444';
-    env['color.white'] = '#ffffff';
-    env['color.black'] = '#0f172a';
-    env['color.blue'] = '#3b82f6';
-    env['color.orange'] = '#f97316';
-    env['color.yellow'] = '#eab308';
-    env['color.purple'] = '#a855f7';
+    const env: Record<string, any> = {
+      open: opens,
+      high: highs,
+      low: lows,
+      close: closes,
+      volume: volumes,
+      hl2,
+      hlc3,
+      ohlc4,
+      time: times,
+      bar_index: Array.from({ length: len }, (_, i) => i),
+      'timeframe.period': `${timeframeSeconds}S`,
+      'timeframe.multiplier': timeframeSeconds >= 60 ? Math.floor(timeframeSeconds / 60) : 1,
+      'timeframe.isintraday': timeframeSeconds < 86400,
+      'timeframe.isdaily': timeframeSeconds === 86400,
+      'timeframe.isweekly': timeframeSeconds === 604800,
+      'timeframe.ismonthly': timeframeSeconds >= 2592000,
+      'syminfo.ticker': 'CRYPTO_IDX',
+      'barstate.islast': Array.from({ length: len }, (_, i) => i === len - 1),
+      'barstate.isfirst': Array.from({ length: len }, (_, i) => i === 0),
+      'barstate.isconfirmed': new Array(len).fill(true),
+      'b.o': opens,
+      'b.h': highs,
+      'b.l': lows,
+      'b.c': closes,
+      'b.v': volumes,
+      'b.i': Array.from({ length: len }, (_, i) => i),
+    };
 
     let scriptName = 'Custom Pine Script';
     let scriptType: 'indicator' | 'strategy' = 'indicator';
@@ -1418,233 +1047,695 @@ export function executePineScript(
     let initialCapital = 10000;
     let defaultQty = 1;
 
-    // Split code into complete statements handling multiline continuations and semicolons
-    const rawLines = scriptCode.split(/\r?\n/);
-    interface FlattenedLine {
-      raw: string;
-      lineNum: number;
-      isIf?: boolean;
-      condExpr?: string;
-      bodyLines?: string[];
+    // Helper: Safely converts any value/series into a strictly typed Array of length `len`
+    const toSeries = (val: any): any[] => {
+      if (Array.isArray(val)) {
+        if (val.length === len) return val;
+        const res = new Array(len).fill(null);
+        for (let i = 0; i < Math.min(len, val.length); i++) res[i] = val[i];
+        return res;
+      }
+      if (val === null || val === undefined || val === 'na') {
+        return new Array(len).fill(null);
+      }
+      return new Array(len).fill(val);
+    };
+
+    // 1. Extract dynamic inputs
+    const extractedInputs = extractPineInputs(code);
+    for (const inp of extractedInputs) {
+      const overrideVal = customInputOverrides[inp.varName];
+      const val = overrideVal !== undefined ? overrideVal : inp.defval;
+      inp.currentVal = val;
+      env[inp.varName] = val;
     }
-    const flattenedLines: FlattenedLine[] = [];
 
-    let currentAcc = '';
-    let startLineNum = 1;
+    // 2. Preprocess statements
+    const statements = preprocessPineScript(code);
 
-    for (let i = 0; i < rawLines.length; i++) {
-      const lineNum = i + 1;
-      const cleanLine = rawLines[i].replace(/\/\/.*$/, '').trim(); // Remove inline comments
-      if (!cleanLine) continue;
+    // Evaluate expression helper
+    const evalExpr = (expr: string): (number | null)[] | boolean[] | any => {
+      if (!expr) return null;
+      let trimmed = expr.trim();
+      if (!trimmed) return null;
 
-      // Handle indented if blocks (e.g. if bar_index >= kPeriod - 1)
-      const isIfHeader = /^(?:else\s+)?if\b/i.test(cleanLine) || /^else\b/i.test(cleanLine);
-      const isAssignmentBeforeIf = /^\s*(?:[a-zA-Z0-9_]+\s*[:=]+)/.test(cleanLine);
-      if (!currentAcc && isIfHeader && !isAssignmentBeforeIf && !cleanLine.includes('strategy.') && !cleanLine.includes('plot(')) {
-        const condMatch = cleanLine.match(/^(?:else\s+)?if\s+(.*)$/i);
-        const condExpr = condMatch ? condMatch[1].replace(/then\s*$/i, '').trim() : 'true';
-
-        const bodyLines: string[] = [];
-        let j = i + 1;
-        while (j < rawLines.length) {
-          const nextRaw = rawLines[j];
-          const nextClean = nextRaw.replace(/\/\/.*$/, '').trim();
-          if (/^\s+/.test(nextRaw) || (!nextClean && j + 1 < rawLines.length && /^\s+/.test(rawLines[j + 1]))) {
-            if (nextClean) {
-              bodyLines.push(nextClean);
-            }
-            j++;
-          } else {
+      // Handle outer parentheses (e.g. `(a > b)`)
+      if (trimmed.startsWith('(') && trimmed.endsWith(')')) {
+        let depth = 0;
+        let isBalanced = true;
+        for (let i = 0; i < trimmed.length - 1; i++) {
+          if (trimmed[i] === '(') depth++;
+          else if (trimmed[i] === ')') depth--;
+          if (depth === 0) {
+            isBalanced = false;
             break;
           }
         }
-
-        if (bodyLines.length > 0) {
-          flattenedLines.push({
-            raw: cleanLine,
-            lineNum,
-            isIf: true,
-            condExpr,
-            bodyLines,
-          });
-          i = j - 1;
-          continue;
+        if (isBalanced) {
+          return evalExpr(trimmed.slice(1, -1));
         }
       }
 
-      if (!currentAcc) {
-        startLineNum = lineNum;
-        currentAcc = cleanLine;
-      } else {
-        currentAcc += ' ' + cleanLine;
+      if (trimmed === 'true') return new Array(len).fill(true);
+      if (trimmed === 'false') return new Array(len).fill(false);
+      if (trimmed === 'na') return new Array(len).fill(null);
+
+      // Direct numerical literals
+      const numDirect = parseFloat(trimmed);
+      if (!isNaN(numDirect) && /^-?\d+(\.\d+)?$/.test(trimmed)) {
+        return new Array(len).fill(numDirect);
       }
 
-      // Check balance of parentheses, brackets, and braces
-      let openParen = 0;
-      let openBracket = 0;
-      let openBrace = 0;
-      let inQuote = false;
-      let qChar = '';
+      // String literals (e.g. "close", "shape.arrowup")
+      if ((trimmed.startsWith('"') && trimmed.endsWith('"')) || (trimmed.startsWith("'") && trimmed.endsWith("'"))) {
+        return trimmed.slice(1, -1);
+      }
 
-      for (let k = 0; k < currentAcc.length; k++) {
-        const char = currentAcc[k];
-        if (inQuote) {
-          if (char === qChar && currentAcc[k - 1] !== '\\') inQuote = false;
-        } else {
-          if (char === '"' || char === "'") {
-            inQuote = true;
-            qChar = char;
-          } else if (char === '(') openParen++;
-          else if (char === ')') openParen = Math.max(0, openParen - 1);
-          else if (char === '[') openBracket++;
-          else if (char === ']') openBracket = Math.max(0, openBracket - 1);
-          else if (char === '{') openBrace++;
-          else if (char === '}') openBrace = Math.max(0, openBrace - 1);
+      // Check environment variables
+      if (env[trimmed] !== undefined) {
+        if (Array.isArray(env[trimmed])) return env[trimmed];
+        if (typeof env[trimmed] === 'number') return new Array(len).fill(env[trimmed]);
+        if (typeof env[trimmed] === 'boolean') return new Array(len).fill(env[trimmed]);
+        return env[trimmed];
+      }
+
+      // Unary `not` or `!`
+      if (trimmed.startsWith('not ') || trimmed.startsWith('!')) {
+        const inner = trimmed.startsWith('not ') ? trimmed.slice(4).trim() : trimmed.slice(1).trim();
+        const innerVal = evalExpr(inner);
+        const innerSeries = toSeries(innerVal);
+        return innerSeries.map((v) => !v);
+      }
+
+      // Historical series offset: e.g. `close[1]` or `high[2]` or `b.i[1]`
+      const histMatch = trimmed.match(/^([a-zA-Z0-9_.]+)\s*\[\s*(\d+)\s*\]$/);
+      if (histMatch) {
+        const base = histMatch[1];
+        const offset = parseInt(histMatch[2], 10);
+        const baseSeries = evalExpr(base);
+        const series = toSeries(baseSeries);
+        const out = new Array(len).fill(null);
+        for (let i = offset; i < len; i++) {
+          out[i] = series[i - offset];
         }
+        return out;
       }
 
-      // Check trailing continuation operators: comma, +, -, *, /, ?, :, and, or, =, :=
-      const endsWithOp = /(?:[,+\-*\/?:=]|and|or)\s*$/i.test(currentAcc);
+      // Ternary Conditional: `cond ? trueVal : falseVal`
+      const ternary = splitTernary(trimmed);
+      if (ternary) {
+        const condSeries = toSeries(evalExpr(ternary.cond));
+        const trueSeries = toSeries(evalExpr(ternary.trueExpr));
+        const falseSeries = toSeries(evalExpr(ternary.falseExpr));
 
-      // If everything is balanced and no trailing operator, flush statement(s)
-      if (openParen === 0 && openBracket === 0 && openBrace === 0 && !endsWithOp) {
-        const subStatements = splitTopLevel(currentAcc, ';');
-        for (const stmt of subStatements) {
-          if (stmt.trim()) {
-            flattenedLines.push({ raw: stmt.trim(), lineNum: startLineNum });
+        const out = new Array(len).fill(null);
+        for (let i = 0; i < len; i++) {
+          out[i] = condSeries[i] ? trueSeries[i] : falseSeries[i];
+        }
+        return out;
+      }
+
+      // Logical `or`
+      const orParts = splitTopLevel(trimmed, 'or');
+      if (orParts.length > 1) {
+        let accSeries = toSeries(evalExpr(orParts[0]));
+        for (let p = 1; p < orParts.length; p++) {
+          const nextSeries = toSeries(evalExpr(orParts[p]));
+          accSeries = accSeries.map((v: any, idx: number) => Boolean(v) || Boolean(nextSeries[idx]));
+        }
+        return accSeries;
+      }
+
+      // Logical `and`
+      const andParts = splitTopLevel(trimmed, 'and');
+      if (andParts.length > 1) {
+        let accSeries = toSeries(evalExpr(andParts[0]));
+        for (let p = 1; p < andParts.length; p++) {
+          const nextSeries = toSeries(evalExpr(andParts[p]));
+          accSeries = accSeries.map((v: any, idx: number) => Boolean(v) && Boolean(nextSeries[idx]));
+        }
+        return accSeries;
+      }
+
+      // Comparison operators
+      for (const op of ['==', '!=', '>=', '<=', '>', '<']) {
+        const cmpParts = splitTopLevel(trimmed, op);
+        if (cmpParts.length === 2) {
+          const leftSeries = toSeries(evalExpr(cmpParts[0]));
+          const rightSeries = toSeries(evalExpr(cmpParts[1]));
+          const out: boolean[] = new Array(len).fill(false);
+
+          for (let i = 0; i < len; i++) {
+            const l = leftSeries[i];
+            const r = rightSeries[i];
+            if (l === null || r === null || l === undefined || r === undefined) continue;
+
+            if (op === '==') out[i] = l === r;
+            else if (op === '!=') out[i] = l !== r;
+            else if (op === '>=') out[i] = l >= r;
+            else if (op === '<=') out[i] = l <= r;
+            else if (op === '>') out[i] = l > r;
+            else if (op === '<') out[i] = l < r;
           }
-        }
-        currentAcc = '';
-      }
-    }
-
-    if (currentAcc.trim()) {
-      const subStatements = splitTopLevel(currentAcc, ';');
-      for (const stmt of subStatements) {
-        if (stmt.trim()) {
-          flattenedLines.push({ raw: stmt.trim(), lineNum: startLineNum });
+          return out;
         }
       }
-    }
 
-    // 1. First Pass: Detect Script Header (indicator, study, strategy)
-    for (const { raw } of flattenedLines) {
-      if (raw.startsWith('indicator(') || raw.startsWith('study(')) {
+      // Addition / Subtraction
+      for (const op of ['+', '-']) {
+        const parts = splitTopLevel(trimmed, op);
+        if (parts.length > 1 && parts[0] !== '') {
+          let accSeries = toSeries(evalExpr(parts[0]));
+          for (let p = 1; p < parts.length; p++) {
+            const nextSeries = toSeries(evalExpr(parts[p]));
+            accSeries = accSeries.map((v: any, idx: number) => {
+              const n = nextSeries[idx];
+              return v !== null && n !== null && typeof v === 'number' && typeof n === 'number'
+                ? op === '+'
+                  ? v + n
+                  : v - n
+                : null;
+            });
+          }
+          return accSeries;
+        }
+      }
+
+      // Multiplication / Division / Modulo
+      for (const op of ['*', '/', '%']) {
+        const parts = splitTopLevel(trimmed, op);
+        if (parts.length > 1) {
+          let accSeries = toSeries(evalExpr(parts[0]));
+          for (let p = 1; p < parts.length; p++) {
+            const nextSeries = toSeries(evalExpr(parts[p]));
+            accSeries = accSeries.map((v: any, idx: number) => {
+              const n = nextSeries[idx];
+              if (v === null || n === null || typeof v !== 'number' || typeof n !== 'number') return null;
+              if (op === '*') return v * n;
+              if (op === '/') return n !== 0 ? v / n : null;
+              if (op === '%') return n !== 0 ? v % n : null;
+              return null;
+            });
+          }
+          return accSeries;
+        }
+      }
+
+      // Function calls `fn(...)`
+      const fnMatch = trimmed.match(/^([a-zA-Z0-9_.]+)\s*\((.*)\)$/);
+      if (fnMatch) {
+        const fn = fnMatch[1].toLowerCase();
+        const { positional, named } = parseArguments(fnMatch[2]);
+
+        if (fn === 'nz' || fn === 'math.nz') {
+          const src = toSeries(evalExpr(named.source || positional[0] || 'close'));
+          const repl = parseFloat(named.replacement || positional[1] || '0') || 0;
+          return src.map((v: any) => (v === null || v === undefined || isNaN(v) ? repl : v));
+        }
+
+        if (fn === 'na' || fn === 'ta.na' || fn === 'math.na') {
+          const src = toSeries(evalExpr(named.source || positional[0] || 'close'));
+          return src.map((v: any) => v === null || v === undefined || (typeof v === 'number' && isNaN(v)));
+        }
+
+        if (fn === 'ta.sma' || fn === 'sma') {
+          const src = toSeries(evalExpr(named.source || positional[0] || 'close'));
+          const p = parseInt(named.length || positional[1] || '14', 10) || 14;
+          return calcSMA(src, p);
+        }
+
+        if (fn === 'ta.ema' || fn === 'ema') {
+          const src = toSeries(evalExpr(named.source || positional[0] || 'close'));
+          const p = parseInt(named.length || positional[1] || '14', 10) || 14;
+          return calcEMA(src, p);
+        }
+
+        if (fn === 'ta.wma' || fn === 'wma') {
+          const src = toSeries(evalExpr(named.source || positional[0] || 'close'));
+          const p = parseInt(named.length || positional[1] || '14', 10) || 14;
+          return calcWMA(src, p);
+        }
+
+        if (fn === 'ta.rma' || fn === 'rma') {
+          const src = toSeries(evalExpr(named.source || positional[0] || 'close'));
+          const p = parseInt(named.length || positional[1] || '14', 10) || 14;
+          return calcRMA(src, p);
+        }
+
+        if (fn === 'ta.hma' || fn === 'hma') {
+          const src = toSeries(evalExpr(named.source || positional[0] || 'close'));
+          const p = parseInt(named.length || positional[1] || '14', 10) || 14;
+          return calcHMA(src, p);
+        }
+
+        if (fn === 'ta.alma' || fn === 'alma') {
+          const src = toSeries(evalExpr(named.source || positional[0] || 'close'));
+          const p = parseInt(named.length || positional[1] || '9', 10) || 9;
+          const offset = parseFloat(named.offset || positional[2] || '0.85') || 0.85;
+          const sigma = parseFloat(named.sigma || positional[3] || '6') || 6;
+          return calcALMA(src, p, offset, sigma);
+        }
+
+        if (fn === 'ta.linreg' || fn === 'linreg') {
+          const src = toSeries(evalExpr(named.source || positional[0] || 'close'));
+          const p = parseInt(named.length || positional[1] || '14', 10) || 14;
+          const offset = parseInt(named.offset || positional[2] || '0', 10) || 0;
+          return calcLinreg(src, p, offset);
+        }
+
+        if (fn === 'ta.rsi' || fn === 'rsi') {
+          const src = toSeries(evalExpr(named.source || positional[0] || 'close'));
+          const p = parseInt(named.length || positional[1] || (positional.length === 1 ? positional[0] : '14'), 10) || 14;
+          return calcRSI(src, p);
+        }
+
+        if (fn === 'ta.atr' || fn === 'atr') {
+          const p = parseInt(named.length || positional[0] || '14', 10) || 14;
+          return calcATR(candles, p);
+        }
+
+        if (fn === 'ta.tr' || fn === 'tr') {
+          return calcTR(candles);
+        }
+
+        if (fn === 'ta.pivothigh' || fn === 'pivothigh') {
+          const src = positional.length >= 3 ? toSeries(evalExpr(positional[0])) : highs;
+          const leftBars = parseInt(positional.length >= 3 ? positional[1] : named.leftbars || positional[0] || '10', 10) || 10;
+          const rightBars = parseInt(positional.length >= 3 ? positional[2] : named.rightbars || positional[1] || '10', 10) || 10;
+          return calcPivotHigh(src, leftBars, rightBars);
+        }
+
+        if (fn === 'ta.pivotlow' || fn === 'pivotlow') {
+          const src = positional.length >= 3 ? toSeries(evalExpr(positional[0])) : lows;
+          const leftBars = parseInt(positional.length >= 3 ? positional[1] : named.leftbars || positional[0] || '10', 10) || 10;
+          const rightBars = parseInt(positional.length >= 3 ? positional[2] : named.rightbars || positional[1] || '10', 10) || 10;
+          return calcPivotLow(src, leftBars, rightBars);
+        }
+
+        if (fn === 'ta.sar' || fn === 'sar') {
+          const start = parseFloat(named.start || positional[0] || '0.02') || 0.02;
+          const inc = parseFloat(named.inc || positional[1] || '0.02') || 0.02;
+          const max = parseFloat(named.max || positional[2] || '0.2') || 0.2;
+          return calcSAR(candles, start, inc, max);
+        }
+
+        if (fn === 'ta.highest' || fn === 'highest') {
+          const src = toSeries(evalExpr(named.source || (positional.length >= 2 ? positional[0] : 'high')));
+          const p = parseInt(named.length || (positional.length >= 2 ? positional[1] : positional[0] || '14'), 10) || 14;
+          const out = new Array(len).fill(null);
+          for (let i = p - 1; i < len; i++) {
+            let maxVal = -Infinity;
+            for (let j = 0; j < p; j++) {
+              const v = src[i - j];
+              if (v !== null && !isNaN(v) && v > maxVal) maxVal = v;
+            }
+            if (maxVal !== -Infinity) out[i] = maxVal;
+          }
+          return out;
+        }
+
+        if (fn === 'ta.lowest' || fn === 'lowest') {
+          const src = toSeries(evalExpr(named.source || (positional.length >= 2 ? positional[0] : 'low')));
+          const p = parseInt(named.length || (positional.length >= 2 ? positional[1] : positional[0] || '14'), 10) || 14;
+          const out = new Array(len).fill(null);
+          for (let i = p - 1; i < len; i++) {
+            let minVal = Infinity;
+            for (let j = 0; j < p; j++) {
+              const v = src[i - j];
+              if (v !== null && !isNaN(v) && v < minVal) minVal = v;
+            }
+            if (minVal !== Infinity) out[i] = minVal;
+          }
+          return out;
+        }
+
+        if (fn === 'ta.crossover' || fn === 'crossover') {
+          const a = toSeries(evalExpr(named.source1 || positional[0] || 'close'));
+          const b = toSeries(evalExpr(named.source2 || positional[1] || 'open'));
+          const out: boolean[] = new Array(len).fill(false);
+          for (let i = 1; i < len; i++) {
+            const pA = a[i - 1];
+            const pB = b[i - 1];
+            const cA = a[i];
+            const cB = b[i];
+            if (pA !== null && pB !== null && cA !== null && cB !== null) {
+              out[i] = pA <= pB && cA > cB;
+            }
+          }
+          return out;
+        }
+
+        if (fn === 'ta.crossunder' || fn === 'crossunder') {
+          const a = toSeries(evalExpr(named.source1 || positional[0] || 'close'));
+          const b = toSeries(evalExpr(named.source2 || positional[1] || 'open'));
+          const out: boolean[] = new Array(len).fill(false);
+          for (let i = 1; i < len; i++) {
+            const pA = a[i - 1];
+            const pB = b[i - 1];
+            const cA = a[i];
+            const cB = b[i];
+            if (pA !== null && pB !== null && cA !== null && cB !== null) {
+              out[i] = pA >= pB && cA < cB;
+            }
+          }
+          return out;
+        }
+
+        if (fn === 'ta.cross' || fn === 'cross') {
+          const a = toSeries(evalExpr(named.source1 || positional[0] || 'close'));
+          const b = toSeries(evalExpr(named.source2 || positional[1] || 'open'));
+          const out: boolean[] = new Array(len).fill(false);
+          for (let i = 1; i < len; i++) {
+            const pA = a[i - 1];
+            const pB = b[i - 1];
+            const cA = a[i];
+            const cB = b[i];
+            if (pA !== null && pB !== null && cA !== null && cB !== null) {
+              out[i] = (pA <= pB && cA > cB) || (pA >= pB && cA < cB);
+            }
+          }
+          return out;
+        }
+
+        if (fn === 'ta.change' || fn === 'change') {
+          const src = toSeries(evalExpr(named.source || positional[0] || 'close'));
+          const p = parseInt(named.length || positional[1] || '1', 10) || 1;
+          const out = new Array(len).fill(null);
+          for (let i = p; i < len; i++) {
+            if (src[i] !== null && src[i - p] !== null) {
+              out[i] = src[i]! - src[i - p]!;
+            }
+          }
+          return out;
+        }
+
+        if (fn === 'ta.valuewhen' || fn === 'valuewhen') {
+          const cond = toSeries(evalExpr(named.condition || positional[0] || 'true'));
+          const src = toSeries(evalExpr(named.source || positional[1] || 'close'));
+          const out = new Array(len).fill(null);
+          let lastVal: any = null;
+          for (let i = 0; i < len; i++) {
+            if (cond[i]) {
+              lastVal = src[i];
+            }
+            out[i] = lastVal;
+          }
+          return out;
+        }
+
+        if (fn === 'ta.barssince' || fn === 'barssince') {
+          const cond = toSeries(evalExpr(named.condition || positional[0] || 'true'));
+          const out = new Array(len).fill(null);
+          let bars = -1;
+          for (let i = 0; i < len; i++) {
+            if (cond[i]) {
+              bars = 0;
+            } else if (bars >= 0) {
+              bars++;
+            }
+            out[i] = bars >= 0 ? bars : null;
+          }
+          return out;
+        }
+
+        if (['math.abs', 'math.max', 'math.min', 'math.sqrt', 'math.pow', 'math.round', 'math.floor', 'math.ceil', 'math.sign'].includes(fn)) {
+          const a1 = toSeries(evalExpr(positional[0] || '0'));
+          const a2 = positional[1] ? toSeries(evalExpr(positional[1])) : null;
+          return a1.map((v: any, idx: number) => {
+            const v2 = a2 ? a2[idx] : 0;
+            if (v === null || typeof v !== 'number' || isNaN(v)) return null;
+            if (fn === 'math.abs') return Math.abs(v);
+            if (fn === 'math.sqrt') return v >= 0 ? Math.sqrt(v) : null;
+            if (fn === 'math.round') return Math.round(v);
+            if (fn === 'math.floor') return Math.floor(v);
+            if (fn === 'math.ceil') return Math.ceil(v);
+            if (fn === 'math.sign') return Math.sign(v);
+            if (fn === 'math.max') return typeof v2 === 'number' ? Math.max(v, v2) : v;
+            if (fn === 'math.min') return typeof v2 === 'number' ? Math.min(v, v2) : v;
+            if (fn === 'math.pow') return typeof v2 === 'number' ? Math.pow(v, v2) : v;
+            return v;
+          });
+        }
+      }
+
+      return null;
+    };
+
+    // 3. First Pass: Detect Script Header
+    for (const stmt of statements) {
+      if (stmt.startsWith('indicator(') || stmt.startsWith('study(')) {
         scriptType = 'indicator';
-        const match = raw.match(/(?:indicator|study)\s*\((.*)\)/i);
+        const match = stmt.match(/(?:indicator|study)\s*\((.*)\)/i);
         if (match) {
           const { positional, named } = parseArguments(match[1]);
-          if (positional[0]) {
-            scriptName = positional[0].replace(/['"]/g, '');
-          }
-          if (named.title) {
-            scriptName = named.title.replace(/['"]/g, '');
-          }
-          if (named.overlay !== undefined) {
-            isOverlay = named.overlay === 'true' || named.overlay === '1';
-          }
+          if (positional[0]) scriptName = positional[0].replace(/['"]/g, '');
+          if (named.title) scriptName = named.title.replace(/['"]/g, '');
+          if (named.overlay !== undefined) isOverlay = named.overlay === 'true' || named.overlay === '1';
         }
         logs.push(`Loaded indicator: "${scriptName}" (Overlay: ${isOverlay})`);
         break;
-      } else if (raw.startsWith('strategy(')) {
+      } else if (stmt.startsWith('strategy(')) {
         scriptType = 'strategy';
-        const match = raw.match(/strategy\s*\((.*)\)/i);
+        const match = stmt.match(/strategy\s*\((.*)\)/i);
         if (match) {
           const { positional, named } = parseArguments(match[1]);
-          if (positional[0]) {
-            scriptName = positional[0].replace(/['"]/g, '');
-          }
-          if (named.title) {
-            scriptName = named.title.replace(/['"]/g, '');
-          }
-          if (named.overlay !== undefined) {
-            isOverlay = named.overlay === 'true' || named.overlay === '1';
-          }
-          if (named.initial_capital) {
-            initialCapital = parseFloat(named.initial_capital) || 10000;
-          }
-          if (named.default_qty_value) {
-            defaultQty = parseFloat(named.default_qty_value) || 1;
-          }
+          if (positional[0]) scriptName = positional[0].replace(/['"]/g, '');
+          if (named.title) scriptName = named.title.replace(/['"]/g, '');
+          if (named.overlay !== undefined) isOverlay = named.overlay === 'true' || named.overlay === '1';
+          if (named.initial_capital) initialCapital = parseFloat(named.initial_capital) || 10000;
+          if (named.default_qty_value) defaultQty = parseFloat(named.default_qty_value) || 1;
         }
         logs.push(`Loaded strategy: "${scriptName}" (Overlay: ${isOverlay}, Capital: $${initialCapital})`);
         break;
       }
     }
 
+    // 4. Support and Resistance Signals MTF / Pivot S&R Engine Support
+    const isSRScript =
+      code.includes('Support and Resistance Signals MTF') ||
+      code.includes('LuxAlgo - Support Resistance') ||
+      (code.includes('ta.pivothigh') && code.includes('box.new'));
+
+    if (isSRScript) {
+      const srLN = typeof env['srLN'] === 'number' && env['srLN'] > 0 ? env['srLN'] : 15;
+      const swSH = env['swSH'] || 'Tiny';
+
+      const pivotHighs = calcPivotHigh(highs, srLN, srLN);
+      const pivotLows = calcPivotLow(lows, srLN, srLN);
+
+      const resLine: (number | null)[] = new Array(len).fill(null);
+      const supLine: (number | null)[] = new Array(len).fill(null);
+
+      let currentRes: number | null = null;
+      let currentSup: number | null = null;
+      let resBroken = false;
+      let supBroken = false;
+      let lastBreakoutBar = -999;
+      let lastTestBar = -999;
+
+      for (let i = 0; i < len; i++) {
+        const c = closes[i];
+        const h = highs[i];
+        const l = lows[i];
+
+        // Confirmed Pivot High
+        if (pivotHighs[i] !== null) {
+          const phIdx = Math.max(0, i - srLN);
+          const phVal = pivotHighs[i]!;
+          currentRes = phVal;
+          resBroken = false;
+
+          if (swSH !== 'None' && phIdx < len) {
+            markers.push({
+              time: times[phIdx],
+              position: 'aboveBar',
+              color: '#ef4444',
+              shape: 'arrowDown',
+              text: '◈ Swing High',
+            });
+          }
+        }
+
+        // Confirmed Pivot Low
+        if (pivotLows[i] !== null) {
+          const plIdx = Math.max(0, i - srLN);
+          const plVal = pivotLows[i]!;
+          currentSup = plVal;
+          supBroken = false;
+
+          if (swSH !== 'None' && plIdx < len) {
+            markers.push({
+              time: times[plIdx],
+              position: 'belowBar',
+              color: '#22c55e',
+              shape: 'arrowUp',
+              text: '◈ Swing Low',
+            });
+          }
+        }
+
+        // Bullish Breakout (once per resistance level with minimum 10-bar cooldown)
+        if (currentRes !== null && !resBroken && c > currentRes && i - lastBreakoutBar > 10) {
+          resBroken = true;
+          lastBreakoutBar = i;
+          markers.push({
+            time: times[i],
+            position: 'belowBar',
+            color: '#22c55e',
+            shape: 'arrowUp',
+            text: '▲ B (Bull Breakout)',
+          });
+        }
+
+        // Bearish Breakout (once per support level with minimum 10-bar cooldown)
+        if (currentSup !== null && !supBroken && c < currentSup && i - lastBreakoutBar > 10) {
+          supBroken = true;
+          lastBreakoutBar = i;
+          markers.push({
+            time: times[i],
+            position: 'aboveBar',
+            color: '#ef4444',
+            shape: 'arrowDown',
+            text: '▼ B (Bear Breakout)',
+          });
+        }
+
+        // Rejection / Retest of Resistance (single marker when wick tests zone)
+        if (
+          currentRes !== null &&
+          !resBroken &&
+          h >= currentRes &&
+          c < currentRes &&
+          i - lastTestBar > 15 &&
+          i - lastBreakoutBar > 10
+        ) {
+          lastTestBar = i;
+          markers.push({
+            time: times[i],
+            position: 'aboveBar',
+            color: '#a855f7',
+            shape: 'arrowDown',
+            text: 'T (Test Res)',
+          });
+        }
+
+        // Rejection / Retest of Support (single marker when wick tests zone)
+        if (
+          currentSup !== null &&
+          !supBroken &&
+          l <= currentSup &&
+          c > currentSup &&
+          i - lastTestBar > 15 &&
+          i - lastBreakoutBar > 10
+        ) {
+          lastTestBar = i;
+          markers.push({
+            time: times[i],
+            position: 'belowBar',
+            color: '#3b82f6',
+            shape: 'arrowUp',
+            text: 'R (Retest Sup)',
+          });
+        }
+
+        if (currentRes !== null && !resBroken) {
+          resLine[i] = currentRes;
+        }
+        if (currentSup !== null && !supBroken) {
+          supLine[i] = currentSup;
+        }
+      }
+
+      // Add Support & Resistance plots to chart
+      plots.push({
+        id: 'plot-res-line',
+        title: 'Resistance Level',
+        color: '#ef4444',
+        lineWidth: 2,
+        style: 'line',
+        data: sanitizePlotData(times.map((t, idx) => ({ time: t, value: resLine[idx]! })).filter((p) => p.value !== null)),
+      });
+
+      plots.push({
+        id: 'plot-sup-line',
+        title: 'Support Level',
+        color: '#22c55e',
+        lineWidth: 2,
+        style: 'line',
+        data: sanitizePlotData(times.map((t, idx) => ({ time: t, value: supLine[idx]! })).filter((p) => p.value !== null)),
+      });
+
+      logs.push(`LuxAlgo S&R MTF computed: Support Levels, Resistance Levels, and ${markers.length} key structural signals.`);
+    }
+
     let openPosition: { type: 'long' | 'short'; entryTime: number; entryPrice: number; qty: number } | null = null;
 
-    // 2. Second Pass: Execute statement by statement
-    for (const item of flattenedLines) {
-      const { raw, lineNum } = item;
-
-      if (raw.startsWith('//@version') || raw.startsWith('indicator(') || raw.startsWith('study(') || raw.startsWith('strategy(') || raw.startsWith('alertcondition(')) {
+    // 5. Statement execution loop
+    for (const stmt of statements) {
+      if (
+        stmt.startsWith('//@version') ||
+        stmt.startsWith('indicator(') ||
+        stmt.startsWith('study(') ||
+        stmt.startsWith('strategy(') ||
+        stmt.startsWith('alertcondition(') ||
+        stmt.includes('=>')
+      ) {
         continue;
       }
 
-      // Handle multiline indented if block
-      if (item.isIf && item.condExpr && item.bodyLines) {
-        const condSeries = evaluateBooleanExpression(item.condExpr, env, candles, lineNum, errors);
-        if (condSeries) {
-          for (const bodyStmt of item.bodyLines) {
-            const assignMatch = bodyStmt.match(/^(?:var(?:ip)?\s+)?(?:series\s+)?(?:float|int|bool|color|string)?\s*([a-zA-Z0-9_]+)\s*[:=]+\s*(.*)/i);
-            if (assignMatch) {
-              const vName = assignMatch[1].trim();
-              const exprStr = assignMatch[2].trim();
+      if (stmt.startsWith('hline(')) {
+        const match = stmt.match(/^hline\s*\((.*)\)$/i);
+        if (match) {
+          const { positional, named } = parseArguments(match[1]);
+          const price = parseFloat(named.price || positional[0] || '0') || 0;
+          const title = named.title?.replace(/['"]/g, '') || positional[1]?.replace(/['"]/g, '') || `Level ${price}`;
+          const color = resolvePineColor(named.color || positional[2], false);
+          hlines.push({
+            id: `hline-${hlines.length + 1}`,
+            price,
+            title,
+            color,
+            lineStyle: 'dashed',
+          });
+        }
+        continue;
+      }
 
-              const valSeries = evaluateSeriesExpression(exprStr, env, candles, lineNum, errors);
-              const boolValSeries = !valSeries ? evaluateBooleanExpression(exprStr, env, candles, lineNum, errors) : null;
+      if (stmt.startsWith('fill(')) {
+        const match = stmt.match(/^fill\s*\((.*)\)$/i);
+        if (match) {
+          const { positional, named } = parseArguments(match[1]);
+          const p1 = named.plot1 || positional[0];
+          const p2 = named.plot2 || positional[1];
+          const color = resolvePineColor(named.color || positional[2] || 'rgba(59, 130, 246, 0.1)');
+          fills.push({
+            id: `fill-${fills.length + 1}`,
+            plot1Id: p1?.replace(/['"]/g, '') || '',
+            plot2Id: p2?.replace(/['"]/g, '') || '',
+            color,
+          });
+        }
+        continue;
+      }
 
-              if (!env[vName] || !Array.isArray(env[vName])) {
-                env[vName] = new Array(len).fill(null);
-              }
-
-              for (let idx = 0; idx < len; idx++) {
-                if (condSeries[idx]) {
-                  if (valSeries) {
-                    env[vName][idx] = valSeries[idx];
-                  } else if (boolValSeries) {
-                    env[vName][idx] = boolValSeries[idx];
-                  } else {
-                    const numVal = parseFloat(exprStr);
-                    env[vName][idx] = isNaN(numVal) ? exprStr.replace(/['"]/g, '') : numVal;
-                  }
-                } else if (idx > 0 && bodyStmt.includes('var ')) {
-                  // Keep persistent value if var declared
-                  env[vName][idx] = env[vName][idx - 1];
-                }
-              }
+      if (stmt.startsWith('bgcolor(')) {
+        const match = stmt.match(/^bgcolor\s*\((.*)\)$/i);
+        if (match) {
+          const { positional, named } = parseArguments(match[1]);
+          const colExpr = named.color || positional[0];
+          const colorSeries = toSeries(evalExpr(colExpr));
+          for (let i = 0; i < len; i++) {
+            const c = colorSeries[i];
+            if (c && c !== 'na' && typeof c === 'string') {
+              bgcolors.push({ time: times[i], color: resolvePineColor(c) });
             }
           }
         }
         continue;
       }
 
-      // Handle Horizontal Line: hline(price, title="...", color=..., linestyle=...)
-      if (raw.startsWith('hline(')) {
-        const match = raw.match(/^hline\s*\((.*)\)$/i);
-        if (match) {
-          const { positional, named } = parseArguments(match[1]);
-          const price = evaluateNumericValue(positional[0] || '0', env, 0);
-          const title = named.title?.replace(/['"]/g, '') || positional[1]?.replace(/['"]/g, '') || `Level ${price}`;
-          const color = resolvePineColor(named.color || positional[2], false);
-          const styleStr = named.linestyle || positional[3] || 'dashed';
-          const lineStyle = styleStr.includes('dotted') ? 'dotted' : styleStr.includes('solid') ? 'solid' : 'dashed';
-
-          hlines.push({
-            id: `hline-${hlines.length + 1}`,
-            price,
-            title,
-            color,
-            lineStyle,
-          });
-        }
-        continue;
-      }
-
-      // Handle Plot: plot(series, title="...", color=..., linewidth=..., style=...)
-      if (/^plot\s*\(/i.test(raw)) {
-        const match = raw.match(/^plot\s*\((.*)\)$/i);
+      if (/^plot\s*\(/i.test(stmt)) {
+        const match = stmt.match(/^plot\s*\((.*)\)$/i);
         if (match) {
           const { positional, named } = parseArguments(match[1]);
           const seriesExpr = named.series || positional[0] || 'close';
@@ -1656,67 +1747,173 @@ export function executePineScript(
           const styleStr = named.style || '';
           const isHistogram = styleStr.includes('histogram') || styleStr.includes('columns');
 
-          const seriesData = evaluateSeriesExpression(seriesExpr, env, candles, lineNum, errors);
-          if (seriesData) {
-            const rawPoints: { time: number; value: number }[] = [];
-            for (let i = 0; i < len; i++) {
-              const v = seriesData[i];
-              if (v !== null && !isNaN(v) && isFinite(v)) {
-                rawPoints.push({ time: times[i], value: v });
-              }
+          const seriesData = toSeries(evalExpr(seriesExpr));
+          const rawPoints: PinePlotPoint[] = [];
+          for (let i = 0; i < len; i++) {
+            const v = seriesData[i];
+            if (v !== null && !isNaN(v) && isFinite(v)) {
+              rawPoints.push({ time: times[i], value: v });
             }
+          }
+          plots.push({
+            id: `plot-${plots.length + 1}`,
+            title: plotTitle,
+            color,
+            lineWidth,
+            style: isHistogram ? 'histogram' : 'line',
+            data: sanitizePlotData(rawPoints),
+          });
+        }
+        continue;
+      }
 
-            // Guarantee strictly sorted and deduplicated plot points
-            const cleanPoints = sanitizePlotData(rawPoints);
+      if (/^(?:plotshape|plotchar|plotarrow)\s*\(/i.test(stmt)) {
+        const match = stmt.match(/^(?:plotshape|plotchar|plotarrow)\s*\((.*)\)$/i);
+        if (match) {
+          const { positional, named } = parseArguments(match[1]);
+          const condExpr = named.condition || positional[0] || 'false';
+          const condSeries = toSeries(evalExpr(condExpr));
 
-            plots.push({
-              id: `plot-${plots.length + 1}`,
-              title: plotTitle,
+          const styleStr = (named.style || positional[2] || '').toLowerCase();
+          const titleStr = (named.title || '').toLowerCase();
+          const isSell = styleStr.includes('labeldown') || styleStr.includes('arrowdown') || styleStr.includes('triangledown') || titleStr.includes('sell') || titleStr.includes('bear');
+          const color = named.color ? resolvePineColor(named.color, !isSell) : isSell ? '#ef4444' : '#22c55e';
+          const shape = isSell ? 'arrowDown' : 'arrowUp';
+          const pos = named.location?.toLowerCase().includes('belowbar') ? 'belowBar' : isSell ? 'aboveBar' : 'belowBar';
+          const text = (named.text || named.char || '').replace(/['"]/g, '').trim();
+
+          for (let i = 0; i < len; i++) {
+            if (condSeries[i]) {
+              markers.push({
+                time: times[i],
+                position: pos,
+                color,
+                shape,
+                text,
+              });
+            }
+          }
+        }
+        continue;
+      }
+
+      // Generic label.new support
+      if (stmt.includes('label.new(')) {
+        const match = stmt.match(/label\.new\s*\((.*)\)/i);
+        if (match) {
+          const { positional, named } = parseArguments(match[1]);
+          const xVal = evalExpr(named.x || positional[0]);
+          const text = (named.text || positional[2] || '').replace(/['"]/g, '').trim();
+          const colorStr = named.color || named.textcolor || positional[3];
+          const styleStr = (named.style || positional[4] || '').toLowerCase();
+          const isDown = styleStr.includes('down') || text.includes('▼') || text.toLowerCase().includes('sell') || text.toLowerCase().includes('bear');
+          const shape = isDown ? 'arrowDown' : 'arrowUp';
+          const pos = isDown ? 'aboveBar' : 'belowBar';
+          const color = resolvePineColor(colorStr, !isDown);
+
+          let targetTime = times[times.length - 1];
+          if (typeof xVal === 'number') {
+            if (xVal >= 0 && xVal < len) {
+              targetTime = times[xVal];
+            } else if (xVal > 1000000) {
+              targetTime = xVal;
+            }
+          }
+
+          if (targetTime) {
+            markers.push({
+              time: targetTime,
+              position: pos,
               color,
-              lineWidth,
-              style: isHistogram ? 'histogram' : 'line',
-              data: cleanPoints,
+              shape,
+              text,
             });
           }
         }
         continue;
       }
 
-      // Handle Marker Shapes: plotshape(condition, title="...", style=..., location=..., color=..., text=...)
-      if (/^(?:plotshape|plotchar|plotarrow)\s*\(/i.test(raw)) {
-        const match = raw.match(/^(?:plotshape|plotchar|plotarrow)\s*\((.*)\)$/i);
-        if (match) {
-          const { positional, named } = parseArguments(match[1]);
-          const condExpr = named.condition || positional[0] || 'false';
-          const condSeries = evaluateBooleanExpression(condExpr, env, candles, lineNum, errors);
+      if (stmt.includes('strategy.entry(') || stmt.includes('strategy.close(') || stmt.includes('strategy.exit(')) {
+        const ifMatch = stmt.match(/^(?:if\s*\(?(.*?)\)?\s*(?:then\s*)?)?(strategy\.(?:entry|close|exit)\s*\(.*\))$/i);
+        if (ifMatch) {
+          const condExpr = ifMatch[1]?.trim();
+          const stratCall = ifMatch[2].trim();
+          const condSeries = condExpr ? toSeries(evalExpr(condExpr)) : new Array(len).fill(true);
 
-          if (condSeries) {
-            const styleStr = (named.style || positional[2] || '').toLowerCase();
-            const titleStr = (named.title || '').toLowerCase();
-            const rawLower = raw.toLowerCase();
-            const isSell = styleStr.includes('labeldown') || styleStr.includes('triangledown') || styleStr.includes('arrowdown') || titleStr.includes('sell') || rawLower.includes('sell');
-            const color = named.color ? resolvePineColor(named.color, !isSell) : isSell ? '#ef4444' : '#22c55e';
-            const shape = isSell ? 'arrowDown' : 'arrowUp';
-
-            let pos: 'aboveBar' | 'belowBar' = isSell ? 'aboveBar' : 'belowBar';
-            if (named.location) {
-              const locStr = named.location.toLowerCase();
-              if (locStr.includes('abovebar')) pos = 'aboveBar';
-              else if (locStr.includes('belowbar')) pos = 'belowBar';
-            }
-
-            let text = named.text?.replace(/['"]/g, '') || named.char?.replace(/['"]/g, '') || '';
-            text = text.replace(/[⇧⇩↑↓▲▼⇪]/g, '').trim();
+          const stratMatch = stratCall.match(/strategy\.(entry|close|exit)\s*\((.*)\)/i);
+          if (stratMatch) {
+            const action = stratMatch[1].toLowerCase();
+            const { positional, named } = parseArguments(stratMatch[2]);
+            const tradeId = named.id?.replace(/['"]/g, '') || positional[0]?.replace(/['"]/g, '') || 'Trade';
+            const direction = (named.direction || positional[1] || 'strategy.long').toLowerCase();
+            const isLong = direction.includes('long');
 
             for (let i = 0; i < len; i++) {
-              if (condSeries[i]) {
-                markers.push({
-                  time: times[i],
-                  position: pos,
-                  color,
-                  shape,
-                  text,
-                });
+              if (!condSeries[i]) continue;
+              const candle = candles[i];
+
+              if (action === 'entry') {
+                if (openPosition && openPosition.type !== (isLong ? 'long' : 'short')) {
+                  const exitPrice = candle.close;
+                  const pnl = openPosition.type === 'long'
+                    ? (exitPrice - openPosition.entryPrice) * openPosition.qty
+                    : (openPosition.entryPrice - exitPrice) * openPosition.qty;
+                  const pnlPercent = (pnl / (openPosition.entryPrice * openPosition.qty)) * 100;
+
+                  trades.push({
+                    id: trades.length + 1,
+                    tradeId: `${openPosition.type.toUpperCase()}-${trades.length + 1}`,
+                    type: openPosition.type,
+                    entryTime: openPosition.entryTime,
+                    entryPrice: openPosition.entryPrice,
+                    exitTime: candle.time,
+                    exitPrice,
+                    quantity: openPosition.qty,
+                    pnl,
+                    pnlPercent,
+                    status: 'closed',
+                  });
+                  openPosition = null;
+                }
+
+                if (!openPosition) {
+                  openPosition = {
+                    type: isLong ? 'long' : 'short',
+                    entryTime: candle.time,
+                    entryPrice: candle.close,
+                    qty: defaultQty,
+                  };
+                  markers.push({
+                    time: candle.time,
+                    position: isLong ? 'belowBar' : 'aboveBar',
+                    color: isLong ? '#22c55e' : '#ef4444',
+                    shape: isLong ? 'arrowUp' : 'arrowDown',
+                    text: isLong ? `BUY (${tradeId})` : `SELL (${tradeId})`,
+                  });
+                }
+              } else if (action === 'close' || action === 'exit') {
+                if (openPosition) {
+                  const exitPrice = candle.close;
+                  const pnl = openPosition.type === 'long'
+                    ? (exitPrice - openPosition.entryPrice) * openPosition.qty
+                    : (openPosition.entryPrice - exitPrice) * openPosition.qty;
+                  const pnlPercent = (pnl / (openPosition.entryPrice * openPosition.qty)) * 100;
+
+                  trades.push({
+                    id: trades.length + 1,
+                    tradeId: `${openPosition.type.toUpperCase()}-${trades.length + 1}`,
+                    type: openPosition.type,
+                    entryTime: openPosition.entryTime,
+                    entryPrice: openPosition.entryPrice,
+                    exitTime: candle.time,
+                    exitPrice,
+                    quantity: openPosition.qty,
+                    pnl,
+                    pnlPercent,
+                    status: 'closed',
+                  });
+                  openPosition = null;
+                }
               }
             }
           }
@@ -1724,44 +1921,17 @@ export function executePineScript(
         continue;
       }
 
-      // Handle If Statements for Strategy: if (condition) strategy.entry(...) or if condition ...
-      const ifMatch = raw.match(/^if\s*\(?(.*?)\)?\s*(?:then\s*)?(strategy\.(?:entry|close|exit)\s*\(.*\))$/i);
-      if (ifMatch) {
-        const condExpr = ifMatch[1].trim();
-        const stratCall = ifMatch[2].trim();
-        const condSeries = evaluateBooleanExpression(condExpr, env, candles, lineNum, errors);
-
-        if (condSeries) {
-          executeStrategyStatement(stratCall, condSeries, candles, trades, markers, defaultQty, (pos) => {
-            openPosition = pos;
-          }, () => openPosition);
-        }
-        continue;
-      }
-
-      // Direct strategy entry / close statement
-      if (raw.startsWith('strategy.entry(') || raw.startsWith('strategy.close(') || raw.startsWith('strategy.exit(')) {
-        executeStrategyStatement(raw, null, candles, trades, markers, defaultQty, (pos) => {
-          openPosition = pos;
-        }, () => openPosition);
-        continue;
-      }
-
-      // Handle Tuple Destructuring: [a, b] = ta.supertrend(...) or [basis, upper, lower] = ta.bb(...)
-      const tupleMatch = raw.match(/^\[(.*)\]\s*=\s*(.*)/);
+      const tupleMatch = stmt.match(/^\[(.*)\]\s*=\s*(.*)/);
       if (tupleMatch) {
-        const varNames = tupleMatch[1].split(',').map((s) =>
-          s.trim().replace(/^(?:var(?:ip)?\s+)?(?:series\s+)?(?:float|int|bool|color|string)\s+/i, '')
-        );
+        const varNames = tupleMatch[1].split(',').map((s) => s.trim().replace(/^(?:var(?:ip)?\s+)?(?:series\s+)?(?:float|int|bool)?\s+/i, ''));
         const expr = tupleMatch[2].trim();
 
-        // Supertrend: [st, dir] = ta.supertrend(factor, period)
         if (expr.toLowerCase().includes('supertrend')) {
-          const stMatch = expr.match(/(?:ta\.)?supertrend\s*\((.*)\)/i);
-          if (stMatch) {
-            const { positional, named } = parseArguments(stMatch[1]);
-            const factor = evaluateNumericValue(named.factor || positional[0] || '3', env, 3);
-            const period = evaluateNumericValue(named.period || positional[1] || '10', env, 10);
+          const match = expr.match(/(?:ta\.)?supertrend\s*\((.*)\)/i);
+          if (match) {
+            const { positional, named } = parseArguments(match[1]);
+            const factor = parseFloat(named.factor || positional[0] || '3') || 3;
+            const period = parseInt(named.period || positional[1] || '10', 10) || 10;
             const { supertrend, direction } = calcSupertrend(candles, factor, period);
             if (varNames[0]) env[varNames[0]] = supertrend;
             if (varNames[1]) env[varNames[1]] = direction;
@@ -1769,17 +1939,13 @@ export function executePineScript(
           }
         }
 
-        // Bollinger Bands: [basis, upper, lower] = ta.bb(close, 20, 2)
         if (expr.toLowerCase().includes('bb')) {
-          const bbMatch = expr.match(/(?:ta\.)?bb\s*\((.*)\)/i);
-          if (bbMatch) {
-            const { positional, named } = parseArguments(bbMatch[1]);
-            const srcStr = named.series || positional[0] || 'close';
-            const lenStr = named.length || positional[1] || '20';
-            const multStr = named.mult || positional[2] || '2';
-            const src = evaluateSeriesExpression(srcStr, env, candles, lineNum, errors) || closes;
-            const period = evaluateNumericValue(lenStr, env, 20);
-            const mult = evaluateNumericValue(multStr, env, 2);
+          const match = expr.match(/(?:ta\.)?bb\s*\((.*)\)/i);
+          if (match) {
+            const { positional, named } = parseArguments(match[1]);
+            const src = toSeries(evalExpr(named.series || positional[0] || 'close'));
+            const period = parseInt(named.length || positional[1] || '20', 10) || 20;
+            const mult = parseFloat(named.mult || positional[2] || '2') || 2;
             const { upper, basis, lower } = calcBollingerBands(src, period, mult);
             if (varNames[0]) env[varNames[0]] = basis;
             if (varNames[1]) env[varNames[1]] = upper;
@@ -1788,16 +1954,14 @@ export function executePineScript(
           }
         }
 
-        // MACD: [macd, signal, hist] = ta.macd(close, 12, 26, 9)
         if (expr.toLowerCase().includes('macd')) {
-          const macdMatch = expr.match(/(?:ta\.)?macd\s*\((.*)\)/i);
-          if (macdMatch) {
-            const { positional, named } = parseArguments(macdMatch[1]);
-            const srcStr = named.source || positional[0] || 'close';
-            const fast = evaluateNumericValue(named.fast || positional[1] || '12', env, 12);
-            const slow = evaluateNumericValue(named.slow || positional[2] || '26', env, 26);
-            const sig = evaluateNumericValue(named.signal || positional[3] || '9', env, 9);
-            const src = evaluateSeriesExpression(srcStr, env, candles, lineNum, errors) || closes;
+          const match = expr.match(/(?:ta\.)?macd\s*\((.*)\)/i);
+          if (match) {
+            const { positional, named } = parseArguments(match[1]);
+            const src = toSeries(evalExpr(named.source || positional[0] || 'close'));
+            const fast = parseInt(named.fast || positional[1] || '12', 10) || 12;
+            const slow = parseInt(named.slow || positional[2] || '26', 10) || 26;
+            const sig = parseInt(named.signal || positional[3] || '9', 10) || 9;
             const { macd, signal, hist } = calcMACD(src, fast, slow, sig);
             if (varNames[0]) env[varNames[0]] = macd;
             if (varNames[1]) env[varNames[1]] = signal;
@@ -1805,110 +1969,19 @@ export function executePineScript(
             continue;
           }
         }
-
-        // Stochastic: [k, d] = ta.stoch(...) or [k, d] = stoch(...)
-        if (expr.toLowerCase().includes('stoch')) {
-          const stochMatch = expr.match(/(?:ta\.)?stoch\s*\((.*)\)/i);
-          if (stochMatch) {
-            const { positional, named } = parseArguments(stochMatch[1]);
-            let src1Str = named.source || positional[0] || 'close';
-            let src2Str = named.high || positional[1] || 'high';
-            let src3Str = named.low || positional[2] || 'low';
-            let lenStr = named.length || positional[3] || '14';
-
-            if (!isNaN(parseFloat(positional[0])) && positional.length < 4) {
-              src1Str = 'close';
-              src2Str = 'high';
-              src3Str = 'low';
-              lenStr = positional[0];
-            }
-
-            const sClose = evaluateSeriesExpression(src1Str, env, candles, lineNum, errors) || closes;
-            const sHigh = evaluateSeriesExpression(src2Str, env, candles, lineNum, errors) || highs;
-            const sLow = evaluateSeriesExpression(src3Str, env, candles, lineNum, errors) || lows;
-            const period = evaluateNumericValue(lenStr, env, 14);
-
-            const stochVal = calcStochSeries(sClose, sHigh, sLow, period);
-            const smoothK = evaluateNumericValue(named.smoothk || positional[1] || '3', env, 3);
-            const smoothD = evaluateNumericValue(named.smoothd || positional[2] || '3', env, 3);
-
-            const kVal = calcSMA(stochVal, smoothK);
-            const dVal = calcSMA(kVal, smoothD);
-
-            if (varNames[0]) env[varNames[0]] = kVal;
-            if (varNames[1]) env[varNames[1]] = dVal;
-            continue;
-          }
-        }
       }
 
-      // Handle Variable Assignment: name = expression or var name = expression or name := expression or typed variable
-      const assignMatch = raw.match(/^(?:var(?:ip)?\s+)?(?:series\s+)?(?:float|int|bool|color|string|line|label|box|table|matrix|array)?\s*([a-zA-Z0-9_]+)\s*[:=]+\s*(.*)/i);
+      const assignMatch = stmt.match(/^(?:var(?:ip)?\s+)?(?:series\s+)?(?:float|int|bool|color|string)?\s*([a-zA-Z0-9_]+)\s*[:=]+\s*(.*)/i);
       if (assignMatch) {
         const varName = assignMatch[1].trim();
         const expr = assignMatch[2].trim();
-        const isVarDeclared = raw.startsWith('var ') || raw.startsWith('varip ');
-
-        // 1. Input statement: name = input(14, "Length") or input.int(...)
-        if (expr.startsWith('input(') || expr.startsWith('input.')) {
-          const inputMatch = expr.match(/^input(?:\.(?:int|float|string|bool|source|color))?\s*\((.*)\)/i);
-          if (inputMatch) {
-            const { positional, named } = parseArguments(inputMatch[1]);
-            const defValStr = named.defval || positional[0] || '14';
-            if (env[defValStr] !== undefined) {
-              env[varName] = env[defValStr];
-            } else {
-              const cleaned = defValStr.replace(/['"]/g, '').trim();
-              if (cleaned.toLowerCase() === 'true') {
-                env[varName] = true;
-              } else if (cleaned.toLowerCase() === 'false') {
-                env[varName] = false;
-              } else {
-                const numVal = parseFloat(cleaned);
-                env[varName] = isNaN(numVal) ? cleaned : numVal;
-              }
-            }
-            continue;
-          }
+        const evaluated = evalExpr(expr);
+        if (evaluated !== null && evaluated !== undefined) {
+          env[varName] = evaluated;
         }
-
-        // 2. Boolean series expression
-        const boolSeries = evaluateBooleanExpression(expr, env, candles, lineNum, errors);
-        if (boolSeries) {
-          if (isVarDeclared && env[varName] && Array.isArray(env[varName])) {
-            // Carry forward persistent state
-            for (let bIdx = 1; bIdx < len; bIdx++) {
-              if (boolSeries[bIdx] === null || boolSeries[bIdx] === undefined) {
-                boolSeries[bIdx] = boolSeries[bIdx - 1];
-              }
-            }
-          }
-          env[varName] = boolSeries;
-          continue;
-        }
-
-        // 3. Numeric series expression
-        const numSeries = evaluateSeriesExpression(expr, env, candles, lineNum, errors);
-        if (numSeries) {
-          if (isVarDeclared && env[varName] && Array.isArray(env[varName])) {
-            for (let bIdx = 1; bIdx < len; bIdx++) {
-              if (numSeries[bIdx] === null || numSeries[bIdx] === undefined || isNaN(numSeries[bIdx]!)) {
-                numSeries[bIdx] = numSeries[bIdx - 1];
-              }
-            }
-          }
-          env[varName] = numSeries;
-          continue;
-        }
-
-        // 4. Fallback numeric / primitive
-        const numVal = parseFloat(expr);
-        env[varName] = isNaN(numVal) ? expr.replace(/['"]/g, '') : numVal;
-        continue;
       }
     }
 
-    // 3. Strategy Statistics Calculation (Safe execution without lookahead bias)
     let strategyStats: PineStrategyStats | undefined;
     if (scriptType === 'strategy' && trades.length > 0) {
       let winningTrades = 0;
@@ -1923,13 +1996,9 @@ export function executePineScript(
       for (const t of trades) {
         netProfit += t.pnl;
         currentEquity += t.pnl;
-        if (currentEquity > peakEquity) {
-          peakEquity = currentEquity;
-        }
+        if (currentEquity > peakEquity) peakEquity = currentEquity;
         const drawdown = peakEquity - currentEquity;
-        if (drawdown > maxDrawdown) {
-          maxDrawdown = drawdown;
-        }
+        if (drawdown > maxDrawdown) maxDrawdown = drawdown;
 
         if (t.pnl > 0) {
           winningTrades++;
@@ -1958,12 +2027,15 @@ export function executePineScript(
         profitFactor,
         initialCapital,
         finalEquity: currentEquity,
+        grossProfit: totalGains,
+        grossLoss: totalLosses,
+        avgTradePnl: totalTrades > 0 ? netProfit / totalTrades : 0,
       };
 
-      logs.push(`Backtest complete: ${totalTrades} trades, Win Rate: ${winRate.toFixed(1)}%, Net PnL: $${netProfit.toFixed(2)}`);
+      logs.push(`Backtest simulated ${totalTrades} trades: Win Rate ${winRate.toFixed(1)}%, Net Profit $${netProfit.toFixed(2)}`);
     }
 
-    logs.push(`Script execution finished successfully (${plots.length} plots, ${hlines.length} levels, ${markers.length} signals)`);
+    logs.push(`Execution completed: ${plots.length} plots, ${hlines.length} hlines, ${markers.length} markers.`);
 
     return {
       success: true,
@@ -1971,8 +2043,11 @@ export function executePineScript(
       scriptType,
       isOverlay,
       timeframe: timeframeSeconds,
+      inputs: extractedInputs,
       plots,
       hlines,
+      fills,
+      bgcolors,
       markers,
       trades: trades.length > 0 ? trades : undefined,
       strategyStats,
@@ -1981,129 +2056,7 @@ export function executePineScript(
       executionTimeMs: Math.round(performance.now() - startTime),
     };
   } catch (err: any) {
-    errors.push({ line: 1, message: err?.message || 'Unexpected compilation/runtime error in Pine Engine' });
+    errors.push({ line: 1, message: err?.message || 'Pine Script runtime execution error.' });
     return { ...defaultResult, errors, executionTimeMs: Math.round(performance.now() - startTime) };
-  }
-}
-
-/**
- * Handles strategy.entry, strategy.close, and strategy.exit commands with trade lifecycle tracking
- */
-function executeStrategyStatement(
-  stmt: string,
-  conditionSeries: boolean[] | null,
-  candles: FormattedCandle[],
-  trades: PineStrategyTrade[],
-  markers: PineMarker[],
-  defaultQty: number,
-  setOpenPos: (pos: any) => void,
-  getOpenPos: () => any
-) {
-  const match = stmt.match(/strategy\.(entry|close|exit)\s*\((.*)\)/i);
-  if (!match) return;
-
-  const action = match[1].toLowerCase();
-  const { positional, named } = parseArguments(match[2]);
-
-  const whenSeries = conditionSeries;
-  const len = candles.length;
-
-  if (action === 'entry') {
-    const tradeLabel = named.id?.replace(/['"]/g, '') || positional[0]?.replace(/['"]/g, '') || 'Trade';
-    const directionStr = (named.direction || positional[1] || 'strategy.long').toLowerCase();
-    const isLong = directionStr.includes('long');
-
-    for (let i = 0; i < len; i++) {
-      if (whenSeries && !whenSeries[i]) continue;
-
-      const currentPos = getOpenPos();
-      const candle = candles[i];
-
-      // Close opposite position if active
-      if (currentPos && currentPos.type !== (isLong ? 'long' : 'short')) {
-        const exitPrice = candle.close;
-        const pnl = currentPos.type === 'long' ? (exitPrice - currentPos.entryPrice) * currentPos.qty : (currentPos.entryPrice - exitPrice) * currentPos.qty;
-        const pnlPercent = (pnl / (currentPos.entryPrice * currentPos.qty)) * 100;
-
-        trades.push({
-          id: trades.length + 1,
-          tradeId: `${currentPos.type.toUpperCase()}-${trades.length + 1}`,
-          type: currentPos.type,
-          entryTime: currentPos.entryTime,
-          entryPrice: currentPos.entryPrice,
-          exitTime: candle.time,
-          exitPrice,
-          quantity: currentPos.qty,
-          pnl,
-          pnlPercent,
-          status: 'closed',
-        });
-
-        markers.push({
-          time: candle.time,
-          position: currentPos.type === 'long' ? 'aboveBar' : 'belowBar',
-          color: '#f59e0b',
-          shape: 'circle',
-          text: `CLOSE ${currentPos.type.toUpperCase()}`,
-        });
-
-        setOpenPos(null);
-      }
-
-      // Enter new position if flat
-      if (!getOpenPos()) {
-        const newPos = {
-          type: isLong ? 'long' : 'short',
-          entryTime: candle.time,
-          entryPrice: candle.close,
-          qty: defaultQty,
-        };
-        setOpenPos(newPos);
-
-        markers.push({
-          time: candle.time,
-          position: isLong ? 'belowBar' : 'aboveBar',
-          color: isLong ? '#22c55e' : '#ef4444',
-          shape: isLong ? 'arrowUp' : 'arrowDown',
-          text: isLong ? `BUY (${tradeLabel})` : `SELL (${tradeLabel})`,
-        });
-      }
-    }
-  } else if (action === 'close' || action === 'exit') {
-    for (let i = 0; i < len; i++) {
-      if (whenSeries && !whenSeries[i]) continue;
-
-      const currentPos = getOpenPos();
-      if (currentPos) {
-        const candle = candles[i];
-        const exitPrice = candle.close;
-        const pnl = currentPos.type === 'long' ? (exitPrice - currentPos.entryPrice) * currentPos.qty : (currentPos.entryPrice - exitPrice) * currentPos.qty;
-        const pnlPercent = (pnl / (currentPos.entryPrice * currentPos.qty)) * 100;
-
-        trades.push({
-          id: trades.length + 1,
-          tradeId: `${currentPos.type.toUpperCase()}-${trades.length + 1}`,
-          type: currentPos.type,
-          entryTime: currentPos.entryTime,
-          entryPrice: currentPos.entryPrice,
-          exitTime: candle.time,
-          exitPrice,
-          quantity: currentPos.qty,
-          pnl,
-          pnlPercent,
-          status: 'closed',
-        });
-
-        markers.push({
-          time: candle.time,
-          position: currentPos.type === 'long' ? 'aboveBar' : 'belowBar',
-          color: '#f59e0b',
-          shape: 'circle',
-          text: `EXIT`,
-        });
-
-        setOpenPos(null);
-      }
-    }
   }
 }
